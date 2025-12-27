@@ -30,6 +30,9 @@ enum TestMode {
 TestMode currentMode = MODE_INIT;
 bool moduleReady = false;
 
+// Объявление функции повтора строки
+String repeat(const char* str, int count);
+
 void printMenu() {
     Serial.println("\n╔════════════════════════════════════════════╗");
     Serial.println("║   МЕНЮ ТЕСТИРОВАНИЯ МОДУЛЯ DWM1000         ║");
@@ -67,9 +70,9 @@ void setup() {
     Serial.printf("  Free Heap: %d байт\n", ESP.getFreeHeap());
     
     // Инициализация модуля DWM1000
-    Serial.println("\n" + String("=").repeat(50));
+    Serial.println("\n" + repeat("=", 50));
     moduleReady = dwm.begin();
-    Serial.println(String("=").repeat(50));
+    Serial.println(repeat("=", 50));
     
     if (moduleReady) {
         Serial.println("\n✓ МОДУЛЬ ГОТОВ К РАБОТЕ!\n");
@@ -160,7 +163,7 @@ void loop() {
                 }
                 break;
                 
-            case '7':
+            case '7': {
                 Serial.println("\n>>> Настройка канала");
                 Serial.println("Доступные каналы: 1, 2, 3, 4, 5, 7");
                 Serial.println("Введите номер канала:");
@@ -175,6 +178,7 @@ void loop() {
                     Serial.println("✗ Неверный канал или модуль не готов!");
                 }
                 break;
+            }
                 
             case '8':
                 Serial.println("\n>>> Сброс модуля");
