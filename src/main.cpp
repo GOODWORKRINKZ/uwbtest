@@ -46,6 +46,7 @@ void printMenu() {
     Serial.println("║ 6 - Режим измерения расстояния (TWR)       ║");
     Serial.println("║ 7 - Настройка канала                       ║");
     Serial.println("║ 8 - Сброс модуля                           ║");
+    Serial.println("║ r - Перезагрузка ESP32                     ║");
     Serial.println("║ m - Показать это меню                      ║");
     Serial.println("╚════════════════════════════════════════════╝");
     Serial.println("\nВведите номер режима:");
@@ -196,6 +197,15 @@ void loop() {
                 } else {
                     Serial.println("✗ Модуль не готов!");
                 }
+                break;
+                
+            case 'r':
+            case 'R':
+                Serial.println("\n>>> Перезагрузка ESP32...");
+                Serial.println("Перезагрузка через 1 секунду...");
+                Serial.flush();
+                delay(1000);
+                ESP.restart();
                 break;
                 
             case 'm':

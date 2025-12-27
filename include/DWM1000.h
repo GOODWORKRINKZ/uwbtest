@@ -15,8 +15,8 @@
 // Пины подключения DWM1000 к ESP32-C3
 // Настройте эти пины согласно вашей схеме подключения
 #define DWM1000_CS_PIN    7    // Chip Select (SS)
-#define DWM1000_RST_PIN   10   // Reset
-#define DWM1000_IRQ_PIN   2    // Interrupt
+#define DWM1000_RST_PIN   9    // Reset (если не подключен, можно оставить)
+#define DWM1000_IRQ_PIN   10   // Interrupt (GPIO8 физически)
 #define DWM1000_MOSI_PIN  6    // MOSI
 #define DWM1000_MISO_PIN  5    // MISO
 #define DWM1000_SCK_PIN   4    // SCK
@@ -82,6 +82,7 @@ public:
     // Основные функции
     bool begin();
     void reset();
+    void softReset();  // Программный сброс через SPI
     uint32_t getDeviceID();
     void getEUI(uint8_t* eui);
     

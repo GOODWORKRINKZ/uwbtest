@@ -14,60 +14,114 @@ bool DWM1000::begin() {
     
     // Настройка пинов
     pinMode(DWM1000_CS_PIN, OUTPUT);
-    pinMode(DWM1000_RST_PIN, OUTPUT);
     pinMode(DWM1000_IRQ_PIN, INPUT);
+    // RST пин не используется (не подключен по схеме)
     
     digitalWrite(DWM1000_CS_PIN, HIGH);
     
     Serial.printf("Пины настроены:\n");
     Serial.printf("  CS:   GPIO %d\n", DWM1000_CS_PIN);
-    Serial.printf("  RST:  GPIO %d\n", DWM1000_RST_PIN);
     Serial.printf("  IRQ:  GPIO %d\n", DWM1000_IRQ_PIN);
     Serial.printf("  MOSI: GPIO %d\n", DWM1000_MOSI_PIN);
     Serial.printf("  MISO: GPIO %d\n", DWM1000_MISO_PIN);
     Serial.printf("  SCK:  GPIO %d\n", DWM1000_SCK_PIN);
+    Serial.println("  RST:  не используется (программный сброс через SPI)");
     
     // Инициализация SPI
     spi = new SPIClass(FSPI);
     spi->begin(DWM1000_SCK_PIN, DWM1000_MISO_PIN, DWM1000_MOSI_PIN, DWM1000_CS_PIN);
-    spi->setFrequency(1000000); // Начинаем с 1 МГц для надежности
-    spi->setDataMode(SPI_MODE0);
+    
+    // Сначала ОЧЕНЬ низкая скорость для стабилизации связи
+    spi->setFrequency(1000000); // 1 МГц для первого контакта
+    spi->setDataMode(SPI_MODE0);  // CPOL=0, CPHA=0
     spi->setBitOrder(MSBFIRST);
     
     Serial.println("SPI инициализирован (1 МГц, MODE0, MSB First)");
     
-    // Сброс модуля
-    Serial.println("\nВыполнение аппаратного сброса...");
-    reset();
-    delay(100);
+    // КРИТИЧНО: Задержка после инициализации SPI
+    Serial.println("\nОжидание стабилизации модуля...");
+    delay(500);  // Большая задержка для стабилизации
+    
+    // Программный сброс модуля через SPI
+    Serial.println("Выполнение программного сброса через SPI...");
+    softReset();
+    delay(500);  // Большая задержка после сброса
+    
+    // Теперь переключаемся на высокую скорость для избежания битового сдвига
+    Serial.println("Переключение на высокую скорость SPI (20 МГц)...");
+    spi->setFrequency(20000000); // 20 МГц - избегаем битового сдвига
+    delay(10);
     
     // Проверка Device ID
     Serial.println("\nПроверка связи с модулем...");
     uint32_t deviceId = getDeviceID();
-    Serial.printf("Device ID: 0x%08X\n", deviceId);
+    Serial.printf("Device ID: 0x%08X (ожидается 0x%08X)\n", deviceId, DWM1000_DEVICE_ID);
+    
+    // Если Device ID неправильный, пробуем тест записи/чтения в регистр 0x21
+    if (deviceId != DWM1000_DEVICE_ID) {
+        Serial.println("\n⚠ Device ID неправильный! Выполняю тест SPI записи/чтения...");
+        
+        // Тест: записываем известные данные в регистр 0x21 и читаем обратно
+        uint8_t testWrite[4] = {0xDE, 0xCA, 0x01, 0x30};
+        uint8_t testRead[4] = {0};
+        
+        writeRegister(0x21, testWrite, 4);
+        delay(10);
+        readRegister(0x21, testRead, 4);
+        
+        Serial.print("Записано: ");
+        for(int i=0; i<4; i++) Serial.printf("%02X ", testWrite[i]);
+        Serial.print("\nПрочитано: ");
+        for(int i=0; i<4; i++) Serial.printf("%02X ", testRead[i]);
+        Serial.println();
+        
+        if (memcmp(testWrite, testRead, 4) == 0) {
+            Serial.println("✓ SPI работает корректно! Проблема в Device ID...");
+            
+            // Применяем фикс бага DWM1000 SPI
+            Serial.println("\nПрименяю фикс DW1000 SPI бага...");
+            writeRegister32(0x04, 0, 0x1600);  // Установить бит 10 в SYS_CFG (0x04)
+            delay(50);
+            
+            deviceId = getDeviceID();
+            Serial.printf("Device ID после фикса: 0x%08X\n", deviceId);
+        } else {
+            Serial.println("✗ SPI не работает! Проблема с подключением.");
+        }
+    }
     
     if (deviceId == DWM1000_DEVICE_ID) {
-        Serial.println("✓ Модуль DWM1000 обнаружен успешно!");
+        Serial.println("\n✓ Модуль DWM1000 обнаружен успешно!");
         initialized = true;
-        
-        // Увеличиваем скорость SPI после успешного подключения
-        spi->setFrequency(8000000); // 8 МГц
-        Serial.println("Скорость SPI увеличена до 8 МГц");
         
         return true;
     } else {
-        Serial.println("✗ ОШИБКА: Модуль DWM1000 не обнаружен или неправильный Device ID");
-        Serial.println("Проверьте подключение модуля!");
+        Serial.println("\n✗ ОШИБКА: Модуль DWM1000 не обнаружен");
+        if (deviceId == 0xFFFFFFFF) {
+            Serial.println("Причина: Все линии HIGH - модуль не отвечает или не подключен");
+        } else if (deviceId == 0x00000000) {
+            Serial.println("Причина: Все линии LOW - проверьте питание модуля");
+        } else {
+            Serial.println("Причина: Неправильный Device ID - проверьте подключение SPI");
+        }
+        Serial.println("\n⚠ РЕЖИМ БЕЗ МОДУЛЯ: Интерфейс активен, но модуль недоступен");
+        Serial.println("Проверьте подключение и используйте команду 'r' для перезагрузки");
         return false;
     }
 }
 
 void DWM1000::reset() {
-    digitalWrite(DWM1000_RST_PIN, LOW);
+    // Программный сброс через SPI (аппаратный RST не подключен)
+    softReset();
+}
+
+void DWM1000::softReset() {
+    // Программный сброс: записываем в регистр PMSC_CTRL0
+    writeRegister8(0x36, 0x00, 0x01);  // Soft reset
     delay(10);
-    digitalWrite(DWM1000_RST_PIN, HIGH);
+    writeRegister8(0x36, 0x00, 0x00);  // Clear reset
     delay(10);
-    Serial.println("Сброс выполнен");
+    Serial.println("Программный сброс выполнен");
 }
 
 uint32_t DWM1000::getDeviceID() {
@@ -357,47 +411,35 @@ void DWM1000::deselectChip() {
 
 void DWM1000::writeRegister(uint8_t reg, uint8_t* data, uint16_t len) {
     selectChip();
+    delayMicroseconds(5);
     
     // Формирование заголовка
-    uint8_t header[3];
-    header[0] = 0x80 | reg; // Бит записи
+    uint8_t header = 0x80 | reg; // Бит 7 = 1 (запись), биты 0-5 = адрес регистра
+    spi->transfer(header);
     
-    if (len <= 127) {
-        spi->transfer(header[0]);
-    } else {
-        header[0] |= 0x40; // Extended length
-        header[1] = len & 0xFF;
-        header[2] = (len >> 8) & 0xFF;
-        spi->transfer(header, 3);
+    // Запись данных побайтно
+    for (uint16_t i = 0; i < len; i++) {
+        spi->transfer(data[i]);
     }
     
-    // Запись данных
-    spi->transfer(data, len);
-    
+    delayMicroseconds(5);
     deselectChip();
 }
 
 void DWM1000::readRegister(uint8_t reg, uint8_t* data, uint16_t len) {
     selectChip();
+    delayMicroseconds(5);
     
     // Формирование заголовка
-    uint8_t header[3];
-    header[0] = reg; // Бит чтения = 0
-    
-    if (len <= 127) {
-        spi->transfer(header[0]);
-    } else {
-        header[0] |= 0x40; // Extended length
-        header[1] = len & 0xFF;
-        header[2] = (len >> 8) & 0xFF;
-        spi->transfer(header, 3);
-    }
+    uint8_t header = reg; // Бит 7 = 0 (чтение), биты 0-5 = адрес регистра
+    spi->transfer(header);
     
     // Чтение данных
     for (uint16_t i = 0; i < len; i++) {
         data[i] = spi->transfer(0x00);
     }
     
+    delayMicroseconds(5);
     deselectChip();
 }
 
