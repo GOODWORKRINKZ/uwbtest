@@ -95,6 +95,7 @@ public:
     void setChannel(uint8_t channel);
     void setPRF(uint8_t prf);
     void setDataRate(uint8_t rate);
+    void setShortAddress(uint16_t address);  // Установка короткого адреса устройства
     
     // Режимы работы
     void enableTransmitter();

@@ -277,6 +277,15 @@ void DWM1000::setChannel(uint8_t channel) {
     Serial.println("Канал настроен");
 }
 
+void DWM1000::setShortAddress(uint16_t address) {
+    // Записываем короткий адрес в регистр PANADR (0x03)
+    // Младшие 2 байта - Short Address, старшие 2 байта - PAN ID
+    uint32_t panadr = readRegister32(REG_PANADR, 0);
+    panadr = (panadr & 0xFFFF0000) | address;  // Сохраняем PAN ID, меняем адрес
+    writeRegister32(REG_PANADR, 0, panadr);
+    Serial.printf("Установлен короткий адрес: 0x%04X\n", address);
+}
+
 void DWM1000::setPRF(uint8_t prf) {
     Serial.printf("Настройка PRF: %d МГц\n", prf);
     // Настройка Pulse Repetition Frequency

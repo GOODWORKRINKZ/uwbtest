@@ -23,12 +23,18 @@ enum TestMode {
     MODE_TEST_COMM,     // Тест коммуникации
     MODE_TRANSMITTER,   // Режим передатчика
     MODE_RECEIVER,      // Режим приемника
-    MODE_RANGING,       // Режим измерения расстояния
+    MODE_RANGING,       // Режим измерения расстояния (старый)
+    MODE_TAG,           // TAG режим (мобильная метка для TWR)
+    MODE_ANCHOR,        // ANCHOR режим (стационарный якорь для TWR)
     MODE_MENU           // Показать меню
 };
 
 TestMode currentMode = MODE_INIT;
 bool moduleReady = false;
+
+// Уникальный адрес устройства на основе MAC-адреса ESP32
+uint16_t deviceShortAddress = 0x0000;
+uint8_t deviceMAC[6];
 
 // Объявление функции повтора строки
 String repeat(const char* str, int count);
@@ -40,16 +46,23 @@ void printMenu() {
     Serial.println("║ 1 - Информация о модуле                    ║");
     Serial.println("║ 2 - Тест коммуникации                      ║");
     Serial.println("║ 3 - Дамп регистров                         ║");
-    Serial.println("║ 4 - Режим передатчика (отправка тестовых   ║");
-    Serial.println("║     данных каждые 2 секунды)               ║");
+    Serial.println("║ 4 - Режим передатчика (тестовые данные)    ║");
     Serial.println("║ 5 - Режим приемника (ожидание данных)      ║");
-    Serial.println("║ 6 - Режим измерения расстояния (TWR)       ║");
-    Serial.println("║ 7 - Настройка канала                       ║");
-    Serial.println("║ 8 - Сброс модуля                           ║");
+    Serial.println("║ 6 - Настройка канала                       ║");
+    Serial.println("║ 7 - Сброс модуля                           ║");
+    Serial.println("║                                            ║");
+    Serial.println("║ === TWR ИЗМЕРЕНИЕ РАССТОЯНИЯ ===           ║");
+    Serial.println("║ t - TAG режим (мобильная метка)            ║");
+    Serial.println("║ a - ANCHOR режим (стационарный якорь)      ║");
+    Serial.println("║                                            ║");
     Serial.println("║ r - Перезагрузка ESP32                     ║");
     Serial.println("║ m - Показать это меню                      ║");
     Serial.println("╚════════════════════════════════════════════╝");
-    Serial.println("\nВведите номер режима:");
+    Serial.printf("\nМой адрес: 0x%04X (MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
+                  deviceShortAddress, 
+                  deviceMAC[0], deviceMAC[1], deviceMAC[2], 
+                  deviceMAC[3], deviceMAC[4], deviceMAC[5]);
+    Serial.println("\nВведите команду:");
 }
 
 void setup() {
@@ -64,6 +77,15 @@ void setup() {
     Serial.println("================================================");
     Serial.println();
     Serial.println(">>> Serial Monitor подключен! <<<");
+    
+    // Получаем MAC-адрес ESP32 для уникальной идентификации
+    esp_read_mac(deviceMAC, ESP_MAC_WIFI_STA);
+    // Используем младшие 2 байта MAC как короткий адрес
+    deviceShortAddress = (deviceMAC[4] << 8) | deviceMAC[5];
+    Serial.printf("\nMAC-адрес: %02X:%02X:%02X:%02X:%02X:%02X\n", 
+                  deviceMAC[0], deviceMAC[1], deviceMAC[2], 
+                  deviceMAC[3], deviceMAC[4], deviceMAC[5]);
+    Serial.printf("Короткий адрес устройства: 0x%04X\n", deviceShortAddress);
     
     Serial.println("\nИнформация о плате:");
     Serial.printf("  Модель: ESP32-C3 Super Mini\n");
@@ -208,6 +230,39 @@ void loop() {
                 ESP.restart();
                 break;
                 
+            case 't':
+            case 'T':
+                Serial.println("\n>>> Выбран режим: TAG (мобильная метка)");
+                if (moduleReady) {
+                    currentMode = MODE_TAG;
+                    Serial.println("\n=== Инициализация TAG режима ===");
+                    Serial.printf("Мой адрес: 0x%04X\n", deviceShortAddress);
+                    dwm.setShortAddress(deviceShortAddress);
+                    dwm.enableReceiver();
+                    Serial.println("TAG готов к измерению расстояния");
+                    Serial.println("Отправка запросов каждые 500 мс...");
+                    Serial.println("Нажмите любую клавишу для возврата в меню\n");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case 'a':
+            case 'A':
+                Serial.println("\n>>> Выбран режим: ANCHOR (стационарный якорь)");
+                if (moduleReady) {
+                    currentMode = MODE_ANCHOR;
+                    Serial.println("\n=== Инициализация ANCHOR режима ===");
+                    Serial.printf("Мой адрес: 0x%04X\n", deviceShortAddress);
+                    dwm.setShortAddress(deviceShortAddress);
+                    dwm.enableReceiver();
+                    Serial.println("ANCHOR готов отвечать на запросы");
+                    Serial.println("Ожидание запросов от TAG...\n");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
             case 'm':
             case 'M':
                 currentMode = MODE_MENU;
@@ -300,6 +355,99 @@ void loop() {
                 
                 float distance = dwm.getDistance();
                 Serial.printf("[%lu мс] Расстояние: %.2f м\n", now, distance);
+            }
+            break;
+            
+        case MODE_TAG:
+            // TAG режим: отправляем запросы и измеряем расстояние
+            if (now - lastAction >= 500) {
+                lastAction = now;
+                
+                // Протокол TWR (Two-Way Ranging)
+                Serial.println("\n=== TWR Цикл измерения ===");
+                
+                // 1. Формируем и отправляем POLL запрос
+                uint8_t pollMsg[16];
+                pollMsg[0] = 0x41;  // Frame Control
+                pollMsg[1] = 0x88;
+                pollMsg[2] = now & 0xFF;  // Sequence number
+                pollMsg[3] = 0xFF;  // PAN ID
+                pollMsg[4] = 0xFF;
+                pollMsg[5] = 0xFF;  // Dest Address (broadcast)
+                pollMsg[6] = 0xFF;
+                pollMsg[7] = deviceShortAddress & 0xFF;  // Source Address
+                pollMsg[8] = (deviceShortAddress >> 8) & 0xFF;
+                pollMsg[9] = 0x01;  // Function Code: POLL
+                
+                Serial.printf("TAG [0x%04X]: Отправка POLL запроса...\n", deviceShortAddress);
+                dwm.sendData(pollMsg, 16);
+                
+                // 2. Ждем RESPONSE от ANCHOR
+                delay(10);  // Пауза для обработки на ANCHOR
+                uint8_t respBuffer[128];
+                uint16_t respLen = dwm.receiveData(respBuffer, 128);
+                
+                if (respLen >= 10 && respBuffer[9] == 0x02) {  // Function Code: RESPONSE
+                    uint16_t anchorAddr = respBuffer[7] | (respBuffer[8] << 8);
+                    Serial.printf("TAG: Получен RESPONSE от ANCHOR [0x%04X]\n", anchorAddr);
+                    
+                    // 3. Отправляем FINAL с меткой времени
+                    pollMsg[9] = 0x03;  // Function Code: FINAL
+                    Serial.println("TAG: Отправка FINAL...");
+                    dwm.sendData(pollMsg, 16);
+                    
+                    // 4. Простой расчет расстояния (без точных меток времени)
+                    // Для точного TWR нужны метки времени из TX_TIME/RX_TIME регистров
+                    Serial.println("TAG: Расчет расстояния...");
+                    float distance = dwm.getDistance();
+                    
+                    Serial.printf("✓ Расстояние до ANCHOR [0x%04X]: %.2f м\n", anchorAddr, distance);
+                } else {
+                    Serial.println("✗ TAG: Нет ответа от ANCHOR");
+                }
+                
+                Serial.println("===================\n");
+            }
+            break;
+            
+        case MODE_ANCHOR:
+            // ANCHOR режим: ожидаем запросы и отвечаем
+            if (now - lastAction >= 50) {
+                lastAction = now;
+                
+                uint8_t rxBuffer[128];
+                uint16_t len = dwm.receiveData(rxBuffer, 128);
+                
+                if (len >= 10 && rxBuffer[9] == 0x01) {  // Function Code: POLL
+                    uint16_t tagAddr = rxBuffer[7] | (rxBuffer[8] << 8);
+                    Serial.printf("\nANCHOR [0x%04X]: Получен POLL от TAG [0x%04X]\n", 
+                                  deviceShortAddress, tagAddr);
+                    
+                    // Отправляем RESPONSE
+                    uint8_t respMsg[16];
+                    respMsg[0] = 0x41;
+                    respMsg[1] = 0x88;
+                    respMsg[2] = rxBuffer[2];  // Echo sequence number
+                    respMsg[3] = 0xFF;
+                    respMsg[4] = 0xFF;
+                    respMsg[5] = tagAddr & 0xFF;  // Dest = TAG
+                    respMsg[6] = (tagAddr >> 8) & 0xFF;
+                    respMsg[7] = deviceShortAddress & 0xFF;  // Source = ANCHOR
+                    respMsg[8] = (deviceShortAddress >> 8) & 0xFF;
+                    respMsg[9] = 0x02;  // Function Code: RESPONSE
+                    
+                    delay(5);  // Короткая пауза перед ответом
+                    Serial.println("ANCHOR: Отправка RESPONSE...");
+                    dwm.sendData(respMsg, 16);
+                    
+                    // Ждем FINAL от TAG
+                    delay(15);
+                    len = dwm.receiveData(rxBuffer, 128);
+                    if (len >= 10 && rxBuffer[9] == 0x03) {  // Function Code: FINAL
+                        Serial.println("ANCHOR: Получен FINAL");
+                        Serial.println("✓ TWR цикл завершен\n");
+                    }
+                }
             }
             break;
             
