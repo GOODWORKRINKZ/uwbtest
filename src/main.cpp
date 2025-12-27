@@ -54,25 +54,32 @@ void printMenu() {
 void setup() {
     // Инициализация Serial
     Serial.begin(115200);
-    delay(1000);
+    delay(2000);  // Увеличена задержка для инициализации Serial
     
     Serial.println("\n\n");
-    Serial.println("╔══════════════════════════════════════════════════╗");
-    Serial.println("║  ТЕСТИРОВАНИЕ МОДУЛЯ DWM1000 НА ESP32-C3         ║");
-    Serial.println("║  Ultra-Wideband (UWB) модуль от Qorvo/Decawave   ║");
-    Serial.println("╚══════════════════════════════════════════════════╝");
+    Serial.println("================================================");
+    Serial.println("  ТЕСТИРОВАНИЕ МОДУЛЯ DWM1000 НА ESP32-C3");
+    Serial.println("  Ultra-Wideband (UWB) модуль от Qorvo/Decawave");
+    Serial.println("================================================");
     Serial.println();
+    Serial.println(">>> Serial Monitor подключен! <<<");
     
-    Serial.println("Информация о плате:");
+    Serial.println("\nИнформация о плате:");
     Serial.printf("  Модель: ESP32-C3 Super Mini\n");
     Serial.printf("  Частота CPU: %d МГц\n", ESP.getCpuFreqMHz());
     Serial.printf("  Flash: %d байт\n", ESP.getFlashChipSize());
     Serial.printf("  Free Heap: %d байт\n", ESP.getFreeHeap());
     
     // Инициализация модуля DWM1000
-    Serial.println("\n" + repeat("=", 50));
+    Serial.println("\n================================================");
+    Serial.println("Начинается инициализация модуля DWM1000...");
+    Serial.println("================================================\n");
+    
     moduleReady = dwm.begin();
-    Serial.println(repeat("=", 50));
+    
+    Serial.println("\n================================================");
+    Serial.println("Инициализация завершена");
+    Serial.println("================================================");
     
     if (moduleReady) {
         Serial.println("\n✓ МОДУЛЬ ГОТОВ К РАБОТЕ!\n");
