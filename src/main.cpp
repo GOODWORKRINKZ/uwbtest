@@ -16,6 +16,9 @@
 #define MODE_TAG    1
 #define MODE_ANCHOR 2
 
+/* Enable calibration mode - set to 1 to calibrate antenna delays */
+#define CALIBRATION_MODE 0
+
 // DEVICE_MODE will be defined by platformio.ini build_flags
 // Use -e tag or -e anchor to select mode
 #ifndef DEVICE_MODE
@@ -51,8 +54,25 @@ static dwt_config_t config = {
 };
 
 /* Default antenna delay values for 64 MHz PRF. */
-#define TX_ANT_DLY 16436
+/* TAG uses calibrated value, ANCHOR uses default */
+#if DEVICE_MODE == MODE_TAG
+#define TX_ANT_DLY 16586  // Calibrated for TAG
+#define RX_ANT_DLY 16586
+#else
+#define TX_ANT_DLY 16436  // Default for ANCHOR  
 #define RX_ANT_DLY 16436
+#endif
+
+#if CALIBRATION_MODE && DEVICE_MODE == MODE_TAG
+/* Calibration parameters */
+static float target_distance = 1.08;  // Target distance in meters (108 cm)
+static uint16 calibration_ant_delay = 16436;  // Starting antenna delay
+static uint16 calibration_step = 256;  // Binary search step
+static float last_error = 0.0;
+static uint16 measurement_count = 0;
+static float distance_sum = 0.0;
+#define CALIBRATION_SAMPLES 50  // Average this many measurements per iteration
+#endif
 
 /* Frames used in the ranging process. */
 static uint8 tx_poll_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'W', 'A', 'V', 'E', 0xE0, 0, 0};
@@ -102,17 +122,33 @@ static double distance;
 /* Kalman filter state for distance smoothing */
 static float kalman_distance = 0.0;
 static float kalman_uncertainty = 1.0;  // P - estimate uncertainty
+static bool kalman_initialized = false;
 const float PROCESS_NOISE = 0.001;      // Q - very low, expect minimal distance change
-const float MEASUREMENT_NOISE = 0.15;   // R - higher to account for UWB ±10cm noise
+const float MEASUREMENT_NOISE = 0.20;   // R - increased for multipath/NLOS rejection
+const float OUTLIER_THRESHOLD = 0.30;   // Reject measurements >30cm from estimate
 
-/* Simple 1D Kalman filter for distance */
+/* Simple 1D Kalman filter with outlier rejection */
 static float kalman_filter(float measurement) {
+    // Initialize on first measurement
+    if (!kalman_initialized) {
+        kalman_distance = measurement;
+        kalman_initialized = true;
+        return kalman_distance;
+    }
+    
+    // Outlier rejection - ignore measurements too far from current estimate
+    float innovation = measurement - kalman_distance;
+    if (fabs(innovation) > OUTLIER_THRESHOLD) {
+        // Measurement is outlier (multipath/NLOS), skip Kalman update
+        return kalman_distance;  // Return previous estimate
+    }
+    
     // Prediction step
     kalman_uncertainty += PROCESS_NOISE;
     
     // Update step
     float kalman_gain = kalman_uncertainty / (kalman_uncertainty + MEASUREMENT_NOISE);
-    kalman_distance += kalman_gain * (measurement - kalman_distance);
+    kalman_distance += kalman_gain * innovation;
     kalman_uncertainty = (1.0 - kalman_gain) * kalman_uncertainty;
     
     return kalman_distance;
@@ -199,9 +235,21 @@ void setup() {
     Serial.println(tx_power, HEX);
     
     /* Apply default antenna delay value. */
+#if CALIBRATION_MODE && DEVICE_MODE == MODE_TAG
+    dwt_setrxantennadelay(calibration_ant_delay);
+    dwt_settxantennadelay(calibration_ant_delay);
+    Serial.println("✓ Antenna delays set (CALIBRATION MODE)");
+    Serial.print("  Target distance: ");
+    Serial.print(target_distance, 2);
+    Serial.println(" m");
+    Serial.print("  Starting delay: ");
+    Serial.println(calibration_ant_delay);
+    Serial.println("  Collecting measurements...\n");
+#else
     dwt_setrxantennadelay(RX_ANT_DLY);
     dwt_settxantennadelay(TX_ANT_DLY);
     Serial.println("✓ Antenna delays set");
+#endif
     
 #if DEVICE_MODE == MODE_TAG
     /* Set expected response's delay and timeout for TAG mode */
@@ -299,6 +347,75 @@ void loop() {
             tof = ((rtd_init - rtd_resp * (1 - clockOffsetRatio)) / 2.0) * DWT_TIME_UNITS;
             distance = tof * SPEED_OF_LIGHT;
             
+#if CALIBRATION_MODE && DEVICE_MODE == MODE_TAG
+            /* Calibration mode - accumulate measurements */
+            distance_sum += distance;
+            measurement_count++;
+            
+            if (measurement_count >= CALIBRATION_SAMPLES) {
+                /* Calculate average distance */
+                float avg_distance = distance_sum / measurement_count;
+                float error = avg_distance - target_distance;
+                
+                Serial.print("Measured: ");
+                Serial.print(avg_distance, 3);
+                Serial.print(" m, Error: ");
+                Serial.print(error * 100, 1);
+                Serial.print(" cm, Delay: ");
+                Serial.print(calibration_ant_delay);
+                Serial.print(", Step: ");
+                Serial.println(calibration_step);
+                
+                /* Check if calibration is complete */
+                if (calibration_step < 3) {
+                    Serial.println("\n========================================");
+                    Serial.println("CALIBRATION COMPLETE!");
+                    Serial.println("========================================");
+                    Serial.print("Final antenna delay: ");
+                    Serial.println(calibration_ant_delay);
+                    Serial.print("Measured distance: ");
+                    Serial.print(avg_distance, 3);
+                    Serial.println(" m");
+                    Serial.print("Target distance: ");
+                    Serial.print(target_distance, 3);
+                    Serial.println(" m");
+                    Serial.print("Error: ");
+                    Serial.print(fabs(error) * 100, 1);
+                    Serial.println(" cm");
+                    Serial.println("\nSet these values in your code:");
+                    Serial.print("#define TX_ANT_DLY ");
+                    Serial.println(calibration_ant_delay);
+                    Serial.print("#define RX_ANT_DLY ");
+                    Serial.println(calibration_ant_delay);
+                    Serial.println("========================================\n");
+                    while(1) { delay(1000); }  // Stop here
+                }
+                
+                /* Binary search algorithm */
+                if (last_error * error < 0.0) {
+                    // Sign changed - reduce step size
+                    calibration_step = calibration_step / 2;
+                }
+                
+                last_error = error;
+                
+                if (error > 0.0) {
+                    // Measured > target, increase delay
+                    calibration_ant_delay += calibration_step;
+                } else {
+                    // Measured < target, decrease delay
+                    calibration_ant_delay -= calibration_step;
+                }
+                
+                /* Apply new antenna delay */
+                dwt_setrxantennadelay(calibration_ant_delay);
+                dwt_settxantennadelay(calibration_ant_delay);
+                
+                /* Reset counters */
+                measurement_count = 0;
+                distance_sum = 0.0;
+            }
+#else
             /* Apply Kalman filter for smooth distance */
             float filtered_distance = kalman_filter(distance);
             
@@ -309,6 +426,7 @@ void loop() {
             Serial.print(":");
             Serial.print(filtered_distance, 2);
             Serial.println("§m");
+#endif
         }
         
         /* Force DW1000 back to IDLE after successful RX */
