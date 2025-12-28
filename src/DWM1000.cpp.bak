@@ -92,6 +92,23 @@ bool DWM1000::begin() {
     
     if (deviceId == DWM1000_DEVICE_ID) {
         Serial.println("\n✓ Модуль DWM1000 обнаружен успешно!");
+        
+        // Показываем текущую конфигурацию
+        Serial.println("\n=== Текущая конфигурация ===");
+        uint32_t chanCtrl = readRegister32(REG_CHAN_CTRL, 0);
+        uint32_t sysCfg = readRegister32(REG_SYS_CFG, 0);
+        uint32_t panadr = readRegister32(REG_PANADR, 0);
+        
+        Serial.printf("CHAN_CTRL:  0x%08X (канал=%d, PRF=%d)\n", chanCtrl, 
+                      chanCtrl & 0xF, (chanCtrl >> 18) & 0x3);
+        Serial.printf("SYS_CFG:    0x%08X\n", sysCfg);
+        Serial.printf("PAN_ADDR:   0x%08X (PAN=0x%04X, Addr=0x%04X)\n", panadr,
+                      (panadr >> 16) & 0xFFFF, panadr & 0xFFFF);
+        
+        // TODO: Полная конфигурация требует настройки множества регистров
+        // Для production кода используйте официальный Decawave driver
+        // или готовую библиотеку типа thotro/arduino-dw1000
+        
         initialized = true;
         
         return true;
@@ -304,53 +321,63 @@ void DWM1000::enableTransmitter() {
 }
 
 void DWM1000::enableReceiver() {
-    Serial.println("\n=== Включение режима приемника ===");
     disableTransceiver();
-    delay(10);
     writeRegister32(REG_SYS_CTRL, 0, SYS_CTRL_RXENAB);
-    Serial.println("Приемник включен и готов к приему");
 }
 
 void DWM1000::disableTransceiver() {
     writeRegister32(REG_SYS_CTRL, 0, SYS_CTRL_TRXOFF);
-    Serial.println("Приемопередатчик выключен");
 }
 
 void DWM1000::sendData(uint8_t* data, uint16_t len) {
-    Serial.printf("\n=== Отправка данных (%d байт) ===\n", len);
+    Serial.printf("\n=== TX (%d байт) ===\n", len);
     Serial.print("Данные: ");
-    for (uint16_t i = 0; i < len && i < 32; i++) {
+    for (uint16_t i = 0; i < len && i < 16; i++) {
         Serial.printf("%02X ", data[i]);
     }
-    if (len > 32) Serial.print("...");
     Serial.println();
     
-    // Запись данных в буфер передачи
+    // КРИТИЧНО: Выключаем приемопередатчик перед настройкой TX
+    writeRegister32(REG_SYS_CTRL, 0, SYS_CTRL_TRXOFF);
+    
+    // Очищаем все флаги статуса
+    writeRegister32(REG_SYS_STATUS, 0, 0xFFFFFFFF);
+    
+    // Запись данных в TX буфер
     writeRegister(REG_TX_BUFFER, data, len);
     
-    // Настройка размера кадра
-    uint8_t txCtrl[5] = {0};
-    txCtrl[0] = len & 0xFF;
-    txCtrl[1] = (len >> 8) & 0x03;
-    writeRegister(REG_TX_FCTRL, txCtrl, 5);
+    // Настройка TX_FCTRL: длина кадра + ranging bit + TX buffer offset
+    // Байты 0-1: длина кадра (биты 0-6 = len, биты 7-8 = offset)
+    // Байт 2: биты управления (бит 13 = ranging bit)
+    uint32_t txFctrl = len | ((uint32_t)0 << 16) | ((uint32_t)1 << 13);  // len + offset=0 + ranging=1
+    writeRegister32(REG_TX_FCTRL, 0, txFctrl);
+    
+    Serial.printf("TX_FCTRL = 0x%08X\n", txFctrl);
     
     // Начало передачи
     writeRegister32(REG_SYS_CTRL, 0, SYS_CTRL_TXSTRT);
-    Serial.println("Передача начата...");
     
-    // Ожидание завершения передачи
-    uint32_t timeout = millis() + 100;
+    // Ожидание завершения (polling TXFRS)
+    unsigned long timeout = millis() + 200;
     while (millis() < timeout) {
         uint32_t status = readRegister32(REG_SYS_STATUS, 0);
+        
         if (status & SYS_STATUS_TXFRS) {
-            Serial.println("✓ Передача завершена успешно");
-            // Очистка флага
+            Serial.println("✓ TX OK");
             writeRegister32(REG_SYS_STATUS, 0, SYS_STATUS_TXFRS);
             return;
         }
-        delay(1);
+        
+        // Проверяем на ошибки
+        if (status & 0x00000400) {  // TXBERR - transmit buffer error
+            Serial.printf("✗ TX BUFFER ERROR! Status=0x%08X\n", status);
+            writeRegister32(REG_SYS_STATUS, 0, 0x00000400);
+            return;
+        }
     }
-    Serial.println("✗ Таймаут передачи");
+    
+    uint32_t finalStatus = readRegister32(REG_SYS_STATUS, 0);
+    Serial.printf("✗ TX TIMEOUT! Status=0x%08X\n", finalStatus);
 }
 
 uint16_t DWM1000::receiveData(uint8_t* buffer, uint16_t maxLen) {
@@ -407,6 +434,196 @@ float DWM1000::getDistance() {
     Serial.println("Расчет расстояния...");
     return 0.0;
 }
+
+// ============================================================================
+// НОВЫЕ ФУНКЦИИ ДЛЯ ПРАВИЛЬНОГО TWR (по образцу официального API)
+// ============================================================================
+
+bool DWM1000::sendPollWaitResponse(uint8_t* data, uint16_t len) {
+    // Запись данных в TX буфер
+    writeRegister(REG_TX_BUFFER, data, len);
+    
+    // Установка длины кадра (с ranging bit)
+    uint32_t txCtrl = len | (1 << 13);  // len + ranging bit
+    writeRegister32(REG_TX_FCTRL, 0, txCtrl);
+    
+    // Настройка RX after TX delay через регистр ACK_RESP_T (0x1A)
+    // W4R_TIM в байтах 0-2, ACK_TIM в байте 3
+    // Задержка 140 µs = 140 * 65536 / 512 = 17920 в единицах ~8ns
+    uint32_t delay = (140 * 128) & 0xFFFFF;  // 20 бит
+    writeRegister32(0x1A, 0, delay);  // REG_ACK_RESP_T
+    
+    // Установка таймаута приема через REG_RX_FWTO
+    uint16_t timeout = 210 * 128;  // 210 µs
+    writeRegister16(REG_RX_FWTO, 0, timeout);
+    
+    Serial.println("TX: Отправка с WAIT4RESP...");
+    
+    // Отправка с флагом WAIT4RESP (автовключение RX)
+    writeRegister32(REG_SYS_CTRL, 0, 0x00000082);  // TXSTRT | WAIT4RESP
+    
+    // Ждем завершения передачи
+    unsigned long timeout_ms = millis() + 100;
+    while (millis() < timeout_ms) {
+        uint32_t status = readRegister32(REG_SYS_STATUS, 0);
+        if (status & SYS_STATUS_TXFRS) {
+            Serial.printf("TX: Передача OK, статус=0x%08X\n", status);
+            writeRegister32(REG_SYS_STATUS, 0, SYS_STATUS_TXFRS);
+            return true;
+        }
+    }
+    
+    Serial.println("TX: TIMEOUT!");
+    return false;
+}
+
+bool DWM1000::sendDelayedResponse(uint8_t* data, uint16_t len) {
+    // Получаем timestamp приема POLL
+    uint64_t pollRxTime = 0;
+    uint8_t tsTab[5];
+    readRegister(REG_RX_TIME, tsTab, 5);
+    for (int i = 4; i >= 0; i--) {
+        pollRxTime <<= 8;
+        pollRxTime |= tsTab[i];
+    }
+    
+    // Вычисляем время отправки RESPONSE (с задержкой 330 µs как в ex_06b)
+    uint32_t delay_uus = 330;
+    uint64_t delay_dtu = (uint64_t)delay_uus * 65536;
+    uint32_t respTxTime = (pollRxTime + delay_dtu) >> 8;
+    
+    // Вычисляем полный TX timestamp (включая antenna delay)
+    uint64_t respTxTs = (((uint64_t)(respTxTime & 0xFFFFFFFEUL)) << 8) + 16436;  // TX_ANT_DLY
+    
+    // Записываем timestamps в сообщение (байты 10-17)
+    for (int i = 0; i < 4; i++) {
+        data[10 + i] = (pollRxTime >> (i * 8)) & 0xFF;
+    }
+    for (int i = 0; i < 4; i++) {
+        data[14 + i] = (respTxTs >> (i * 8)) & 0xFF;
+    }
+    
+    // Записываем данные в TX буфер
+    writeRegister(REG_TX_BUFFER, data, len);
+    
+    // Устанавливаем длину кадра
+    uint32_t txCtrl = len | (1 << 13);  // len + ranging bit
+    writeRegister32(REG_TX_FCTRL, 0, txCtrl);
+    
+    // Устанавливаем delayed TX time
+    writeRegister32(REG_DX_TIME, 0, respTxTime);
+    
+    // Запускаем delayed TX
+    writeRegister32(REG_SYS_CTRL, 0, 0x00000002 | 0x00000004);  // TXSTRT | TXDLYS
+    
+    // Ждем завершения передачи
+    unsigned long timeout = millis() + 100;
+    while (millis() < timeout) {
+        uint32_t status = readRegister32(REG_SYS_STATUS, 0);
+        if (status & SYS_STATUS_TXFRS) {
+            writeRegister32(REG_SYS_STATUS, 0, SYS_STATUS_TXFRS);
+            return true;
+        }
+        if (status & 0x10000000) {  // HPDWARN - delayed TX too late
+            return false;
+        }
+    }
+    
+    return false;
+}
+
+uint16_t DWM1000::readReceivedData(uint8_t* buffer, uint16_t maxLen) {
+    // Получаем длину кадра из RX_FINFO
+    uint32_t rxInfo = readRegister32(REG_RX_FINFO, 0);
+    uint16_t len = rxInfo & 0x3FF;
+    
+    Serial.printf("RX_FINFO=0x%08X, len=%d\n", rxInfo, len);
+    
+    if (len == 0) {
+        Serial.println("✗ Длина = 0!");
+        return 0;
+    }
+    
+    if (len > maxLen) {
+        Serial.printf("! Обрезка %d -> %d\n", len, maxLen);
+        len = maxLen;
+    }
+    
+    // Читаем данные из RX буфера
+    readRegister(REG_RX_BUFFER, buffer, len);
+    
+    // Отладка - показываем первые байты
+    Serial.printf("RX RAW (%d): ", len);
+    for (int i = 0; i < min((int)len, 16); i++) {
+        Serial.printf("%02X ", buffer[i]);
+    }
+    Serial.println();
+    
+    return len;
+}
+
+uint32_t DWM1000::getStatus() {
+    return readRegister32(REG_SYS_STATUS, 0);
+}
+
+void DWM1000::clearRxStatus() {
+    // Очищаем флаг успешного приема
+    writeRegister32(REG_SYS_STATUS, 0, SYS_STATUS_RXFCG | SYS_STATUS_TXFRS);
+}
+
+void DWM1000::clearRxError() {
+    // Очищаем все флаги ошибок RX
+    writeRegister32(REG_SYS_STATUS, 0, 0x60000000);  // ALL_RX_TO | ALL_RX_ERR
+}
+
+void DWM1000::rxReset() {
+    // Программный сброс приемника (как dwt_rxreset в официальном API)
+    // Записываем в PMSC_CTRL0 для сброса RX
+    uint8_t pmscCtrl0[4];
+    
+    // Читаем текущее значение
+    readRegister(REG_PMSC, pmscCtrl0, 4);
+    
+    // Устанавливаем бит сброса RX
+    pmscCtrl0[3] = 0xE0;
+    writeRegister(REG_PMSC, pmscCtrl0, 4);
+    
+    // Сбрасываем бит
+    pmscCtrl0[3] = 0xF0;
+    writeRegister(REG_PMSC, pmscCtrl0, 4);
+}
+
+float DWM1000::calculateDistance(uint8_t* respMsg, uint16_t len) {
+    if (len < 18) return -1.0;
+    
+    // Извлекаем timestamps из RESPONSE сообщения
+    uint32_t pollRxTs = 0;
+    uint32_t respTxTs = 0;
+    
+    for (int i = 0; i < 4; i++) {
+        pollRxTs |= ((uint32_t)respMsg[10 + i]) << (i * 8);
+        respTxTs |= ((uint32_t)respMsg[14 + i]) << (i * 8);
+    }
+    
+    // Получаем наши локальные timestamps (нужно читать из регистров TX_TIME)
+    uint32_t pollTxTs = 0;  // TODO: читать из последней передачи
+    uint32_t respRxTs = 0;  // TODO: читать из последнего приема
+    
+    // Простой расчет RTD (Round Trip Delay)
+    int32_t rtdInit = respRxTs - pollTxTs;
+    int32_t rtdResp = respTxTs - pollRxTs;
+    
+    // TOF = (RTD_initiator - RTD_responder) / 2
+    const float DWT_TIME_UNITS = 1.0 / 499.2e6 / 128.0;  // ~15.65 ps
+    const float SPEED_OF_LIGHT = 299702547.0;  // m/s в воздухе
+    
+    float tof = ((float)(rtdInit - rtdResp) / 2.0) * DWT_TIME_UNITS;
+    float distance = tof * SPEED_OF_LIGHT;
+    
+    return distance;
+}
+
+// ============================================================================
 
 // Внутренние функции SPI
 

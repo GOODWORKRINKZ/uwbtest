@@ -106,9 +106,19 @@ public:
     void sendData(uint8_t* data, uint16_t len);
     uint16_t receiveData(uint8_t* buffer, uint16_t maxLen);
     
+    // Новые функции для правильного TWR (по образцу официального API)
+    bool sendPollWaitResponse(uint8_t* data, uint16_t len);  // Отправка с автовключением RX
+    bool sendDelayedResponse(uint8_t* data, uint16_t len);   // Отправка с delayed TX
+    uint16_t readReceivedData(uint8_t* buffer, uint16_t maxLen);  // Чтение без логов
+    uint32_t getStatus();  // Прямое чтение SYS_STATUS
+    void clearRxStatus();  // Очистка флага RXFCG
+    void clearRxError();   // Очистка ошибок RX
+    void rxReset();        // Сброс RX (dwt_rxreset)
+    
     // Режим измерения расстояния
     void initRanging();
     float getDistance();
+    float calculateDistance(uint8_t* respMsg, uint16_t len);  // Расчет из timestamps
     
 private:
     SPIClass* spi;

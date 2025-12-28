@@ -1,468 +1,484 @@
-/**
- * @file main.cpp
- * @brief Тестовая программа для модуля DWM1000 на ESP32-C3
+/*! ----------------------------------------------------------------------------
+ * @file    main.cpp
+ * @brief   SS-TWR implementation using official Decawave driver for ESP32-C3
  * 
- * Эта программа демонстрирует различные режимы работы модуля DWM1000:
- * - Инициализация и проверка связи
- * - Режим передатчика
- * - Режим приемника
- * - Режим измерения расстояния
- * 
- * Для управления используется Serial Monitor (115200 baud)
+ * Based on Decawave ex_06a (TAG/Initiator) and ex_06b (ANCHOR/Responder)
+ * Adapted for Arduino ESP32-C3 framework
  */
 
 #include <Arduino.h>
-#include "DWM1000.h"
+#include "deca_device_api.h"
+#include "deca_regs.h"
+#include "deca_spi.h"
+#include "port_arduino.h"
 
-DWM1000 dwm;
+// Mode selection
+#define MODE_TAG    1
+#define MODE_ANCHOR 2
 
-// Режимы работы
-enum TestMode {
-    MODE_INIT,          // Начальная инициализация
-    MODE_INFO,          // Вывод информации о модуле
-    MODE_TEST_COMM,     // Тест коммуникации
-    MODE_TRANSMITTER,   // Режим передатчика
-    MODE_RECEIVER,      // Режим приемника
-    MODE_RANGING,       // Режим измерения расстояния (старый)
-    MODE_TAG,           // TAG режим (мобильная метка для TWR)
-    MODE_ANCHOR,        // ANCHOR режим (стационарный якорь для TWR)
-    MODE_MENU           // Показать меню
+// DEVICE_MODE will be defined by platformio.ini build_flags
+// Use -e tag or -e anchor to select mode
+#ifndef DEVICE_MODE
+#define DEVICE_MODE MODE_TAG  // Default to TAG if not specified
+#endif
+
+#ifndef DEVICE_NAME
+#if DEVICE_MODE == MODE_TAG
+#define DEVICE_NAME "TAG"
+#else
+#define DEVICE_NAME "ANCHOR"
+#endif
+#endif
+
+/* Application name */
+#define APP_NAME "SS TWR " DEVICE_NAME
+
+/* Inter-ranging delay period, in milliseconds. */
+#define RNG_DELAY_MS 1000
+
+/* Default communication configuration. We use here EVK1000's mode 4. */
+static dwt_config_t config = {
+    2,               /* Channel number. */
+    DWT_PRF_64M,     /* Pulse repetition frequency. */
+    DWT_PLEN_128,    /* Preamble length. Used in TX only. */
+    DWT_PAC8,        /* Preamble acquisition chunk size. Used in RX only. */
+    9,               /* TX preamble code. Used in TX only. */
+    9,               /* RX preamble code. Used in RX only. */
+    0,               /* 0 to use standard SFD, 1 to use non-standard SFD. */
+    DWT_BR_6M8,      /* Data rate. */
+    DWT_PHRMODE_STD, /* PHY header mode. */
+    (129 + 8 - 8)    /* SFD timeout (preamble length + 1 + SFD length - PAC size). Used in RX only. */
 };
 
-TestMode currentMode = MODE_INIT;
-bool moduleReady = false;
+/* Default antenna delay values for 64 MHz PRF. */
+#define TX_ANT_DLY 16436
+#define RX_ANT_DLY 16436
 
-// Уникальный адрес устройства на основе MAC-адреса ESP32
-uint16_t deviceShortAddress = 0x0000;
-uint8_t deviceMAC[6];
+/* Frames used in the ranging process. */
+static uint8 tx_poll_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'W', 'A', 'V', 'E', 0xE0, 0, 0};
+static uint8 rx_resp_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'V', 'E', 'W', 'A', 0xE1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static uint8 rx_poll_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'W', 'A', 'V', 'E', 0xE0, 0, 0};
+static uint8 tx_resp_msg[] = {0x41, 0x88, 0, 0xCA, 0xDE, 'V', 'E', 'W', 'A', 0xE1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
-// Объявление функции повтора строки
-String repeat(const char* str, int count);
+/* Length of the common part of the message */
+#define ALL_MSG_COMMON_LEN 10
+/* Indexes to access some of the fields in the frames */
+#define ALL_MSG_SN_IDX 2
+#define RESP_MSG_POLL_RX_TS_IDX 10
+#define RESP_MSG_RESP_TX_TS_IDX 14
+#define RESP_MSG_TS_LEN 4
 
-void printMenu() {
-    Serial.println("\n╔════════════════════════════════════════════╗");
-    Serial.println("║   МЕНЮ ТЕСТИРОВАНИЯ МОДУЛЯ DWM1000         ║");
-    Serial.println("╠════════════════════════════════════════════╣");
-    Serial.println("║ 1 - Информация о модуле                    ║");
-    Serial.println("║ 2 - Тест коммуникации                      ║");
-    Serial.println("║ 3 - Дамп регистров                         ║");
-    Serial.println("║ 4 - Режим передатчика (тестовые данные)    ║");
-    Serial.println("║ 5 - Режим приемника (ожидание данных)      ║");
-    Serial.println("║ 6 - Настройка канала                       ║");
-    Serial.println("║ 7 - Сброс модуля                           ║");
-    Serial.println("║                                            ║");
-    Serial.println("║ === TWR ИЗМЕРЕНИЕ РАССТОЯНИЯ ===           ║");
-    Serial.println("║ t - TAG режим (мобильная метка)            ║");
-    Serial.println("║ a - ANCHOR режим (стационарный якорь)      ║");
-    Serial.println("║                                            ║");
-    Serial.println("║ r - Перезагрузка ESP32                     ║");
-    Serial.println("║ m - Показать это меню                      ║");
-    Serial.println("╚════════════════════════════════════════════╝");
-    Serial.printf("\nМой адрес: 0x%04X (MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
-                  deviceShortAddress, 
-                  deviceMAC[0], deviceMAC[1], deviceMAC[2], 
-                  deviceMAC[3], deviceMAC[4], deviceMAC[5]);
-    Serial.println("\nВведите команду:");
-}
+/* Frame sequence number, incremented after each transmission. */
+static uint8 frame_seq_nb = 0;
+
+/* Buffer to store received messages. */
+#define RX_BUF_LEN 20
+static uint8 rx_buffer[RX_BUF_LEN];
+/* Statistics counters */
+static uint32 last_stats_time = 0;
+static uint32 success_count = 0;
+static uint32 timeout_count = 0;
+static uint32 error_count = 0;
+/* Hold copy of status register state here for reference. */
+static uint32 status_reg = 0;
+
+/* UWB microsecond (uus) to device time unit (dtu, around 15.65 ps) conversion factor. */
+#define UUS_TO_DWT_TIME 65536
+
+/* Delay between frames, in UWB microseconds. */
+#define POLL_TX_TO_RESP_RX_DLY_UUS 140
+#define POLL_RX_TO_RESP_TX_DLY_UUS 2500  /* Increased for Serial.print overhead */
+
+/* Receive response timeout. */
+#define RESP_RX_TIMEOUT_UUS 5000  /* Increased to match longer ANCHOR delay */
+
+/* Speed of light in air, in metres per second. */
+#define SPEED_OF_LIGHT 299702547
+
+/* Hold copies of computed time of flight and distance. */
+static double tof;
+static double distance;
+
+/* Timestamps of frames transmission/reception. */
+typedef unsigned long long uint64;
+static uint64 poll_rx_ts;
+static uint64 resp_tx_ts;
+
+/* Function prototypes */
+static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts);
+static void resp_msg_set_ts(uint8 *ts_field, const uint64 ts);
+static uint64 get_rx_timestamp_u64(void);
 
 void setup() {
-    // Инициализация Serial
     Serial.begin(115200);
-    delay(2000);  // Увеличена задержка для инициализации Serial
+    delay(1000);
     
-    Serial.println("\n\n");
-    Serial.println("================================================");
-    Serial.println("  ТЕСТИРОВАНИЕ МОДУЛЯ DWM1000 НА ESP32-C3");
-    Serial.println("  Ultra-Wideband (UWB) модуль от Qorvo/Decawave");
-    Serial.println("================================================");
-    Serial.println();
-    Serial.println(">>> Serial Monitor подключен! <<<");
+    Serial.println("\n\n================================");
+    Serial.println(APP_NAME);
+    Serial.println("Official Decawave Driver");
+    Serial.println("================================\n");
     
-    // Получаем MAC-адрес ESP32 для уникальной идентификации
-    esp_read_mac(deviceMAC, ESP_MAC_WIFI_STA);
-    // Используем младшие 2 байта MAC как короткий адрес
-    deviceShortAddress = (deviceMAC[4] << 8) | deviceMAC[5];
-    Serial.printf("\nMAC-адрес: %02X:%02X:%02X:%02X:%02X:%02X\n", 
-                  deviceMAC[0], deviceMAC[1], deviceMAC[2], 
-                  deviceMAC[3], deviceMAC[4], deviceMAC[5]);
-    Serial.printf("Короткий адрес устройства: 0x%04X\n", deviceShortAddress);
+    /* Initialize peripherals */
+    peripherals_init();
     
-    Serial.println("\nИнформация о плате:");
-    Serial.printf("  Модель: ESP32-C3 Super Mini\n");
-    Serial.printf("  Частота CPU: %d МГц\n", ESP.getCpuFreqMHz());
-    Serial.printf("  Flash: %d байт\n", ESP.getFlashChipSize());
-    Serial.printf("  Free Heap: %d байт\n", ESP.getFreeHeap());
+    Serial.println("Testing SPI communication...");
     
-    // Инициализация модуля DWM1000
-    Serial.println("\n================================================");
-    Serial.println("Начинается инициализация модуля DWM1000...");
-    Serial.println("================================================\n");
+    /* DW1000 power-up delay (hardware RST not connected) */
+    reset_DW1000();  // Just delay for power-up
     
-    moduleReady = dwm.begin();
+    /* Apply DW1000 SPI bug fix at high speed before slowrate */
+    dwt_write32bitreg(SYS_CFG_ID, 0x1600);
+    Serial.println("✓ Applied DW1000 SPI bug fix");
     
-    Serial.println("\n================================================");
-    Serial.println("Инициализация завершена");
-    Serial.println("================================================");
+    /* Set SPI to slow speed for initialization */
+    port_set_dw1000_slowrate();
+    Serial.println("✓ SPI set to slow rate (3MHz)");
     
-    if (moduleReady) {
-        Serial.println("\n✓ МОДУЛЬ ГОТОВ К РАБОТЕ!\n");
-        dwm.printDeviceInfo();
-        printMenu();
-    } else {
-        Serial.println("\n✗ ОШИБКА ИНИЦИАЛИЗАЦИИ!");
-        Serial.println("\nПроверьте:");
-        Serial.println("  1. Правильность подключения проводов");
-        Serial.println("  2. Питание модуля (3.3V)");
-        Serial.println("  3. Соответствие пинов в DWM1000.h");
-        Serial.println("\nПерезагрузите плату после исправления...");
+    /* Test Device ID */
+    uint32 testID = dwt_readdevid();
+    Serial.print("Device ID: 0x");
+    Serial.println(testID, HEX);
+    
+    if (testID != 0xDECA0130) {
+        Serial.println("❌ SPI COMMUNICATION FAILED!");
+        Serial.print("   Expected: 0xDECA0130, Got: 0x");
+        Serial.println(testID, HEX);
+        while (1) { delay(1000); }
     }
+    
+    Serial.println("✓ Device ID OK, starting initialization...");
+    
+    /* Initialize DW1000 with microcode loading */
+    if (dwt_initialise(DWT_LOADUCODE) == DWT_ERROR) {
+        Serial.println("❌ DW1000 INIT FAILED!");
+        while (1) { delay(100); }
+    }
+    
+    /* Switch to fast SPI speed after initialization */
+    port_set_dw1000_fastrate();
+    Serial.println("✓ DW1000 initialization complete");
+    
+    /* Read Device ID */
+    uint32 devID = dwt_readdevid();
+    Serial.print("Device ID: 0x");
+    Serial.println(devID, HEX);
+    
+    /* Configure DW1000. */
+    dwt_configure(&config);
+    Serial.println("✓ DW1000 configured");
+    
+    /* Enable smart TX power control */
+    dwt_setsmarttxpower(1);
+    Serial.println("✓ Smart TX power enabled");
+    
+    // Verify configuration
+    uint32_t chan_ctrl = dwt_read32bitreg(CHAN_CTRL_ID);
+    uint32_t tx_power = dwt_read32bitreg(TX_POWER_ID);
+    Serial.print("  CHAN_CTRL: 0x");
+    Serial.print(chan_ctrl, HEX);
+    Serial.print(", TX_POWER: 0x");
+    Serial.println(tx_power, HEX);
+    
+    /* Apply default antenna delay value. */
+    dwt_setrxantennadelay(RX_ANT_DLY);
+    dwt_settxantennadelay(TX_ANT_DLY);
+    Serial.println("✓ Antenna delays set");
+    
+#if DEVICE_MODE == MODE_TAG
+    /* Set expected response's delay and timeout for TAG mode */
+    dwt_setrxaftertxdelay(POLL_TX_TO_RESP_RX_DLY_UUS);
+    dwt_setrxtimeout(RESP_RX_TIMEOUT_UUS);
+    Serial.println("✓ TAG mode ready\n");
+#else
+    Serial.println("✓ ANCHOR mode ready\n");
+#endif
 }
 
 void loop() {
-    // Проверка команд из Serial
-    if (Serial.available()) {
-        char cmd = Serial.read();
-        
-        // Очистка буфера
-        while (Serial.available()) Serial.read();
-        
-        switch (cmd) {
-            case '1':
-                Serial.println("\n>>> Выбран режим: Информация о модуле");
-                if (moduleReady) {
-                    dwm.printDeviceInfo();
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                }
-                break;
-                
-            case '2':
-                Serial.println("\n>>> Выбран режим: Тест коммуникации");
-                if (moduleReady) {
-                    dwm.testCommunication();
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                }
-                break;
-                
-            case '3':
-                Serial.println("\n>>> Выбран режим: Дамп регистров");
-                if (moduleReady) {
-                    dwm.printRegisters();
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                }
-                break;
-                
-            case '4':
-                Serial.println("\n>>> Выбран режим: Передатчик");
-                currentMode = MODE_TRANSMITTER;
-                if (moduleReady) {
-                    dwm.enableTransmitter();
-                    Serial.println("Отправка данных каждые 2 секунды...");
-                    Serial.println("Нажмите любую клавишу для возврата в меню");
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                    currentMode = MODE_MENU;
-                }
-                break;
-                
-            case '5':
-                Serial.println("\n>>> Выбран режим: Приемник");
-                currentMode = MODE_RECEIVER;
-                if (moduleReady) {
-                    dwm.enableReceiver();
-                    Serial.println("Ожидание данных...");
-                    Serial.println("Нажмите любую клавишу для возврата в меню");
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                    currentMode = MODE_MENU;
-                }
-                break;
-                
-            case '6':
-                Serial.println("\n>>> Выбран режим: Измерение расстояния");
-                currentMode = MODE_RANGING;
-                if (moduleReady) {
-                    dwm.initRanging();
-                    Serial.println("Режим TWR активирован");
-                    Serial.println("Нажмите любую клавишу для возврата в меню");
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                    currentMode = MODE_MENU;
-                }
-                break;
-                
-            case '7': {
-                Serial.println("\n>>> Настройка канала");
-                Serial.println("Доступные каналы: 1, 2, 3, 4, 5, 7");
-                Serial.println("Введите номер канала:");
-                
-                while (!Serial.available()) delay(10);
-                uint8_t channel = Serial.parseInt();
-                while (Serial.available()) Serial.read();
-                
-                if (moduleReady && (channel >= 1 && channel <= 7 && channel != 6)) {
-                    dwm.setChannel(channel);
-                } else {
-                    Serial.println("✗ Неверный канал или модуль не готов!");
-                }
-                break;
-            }
-                
-            case '8':
-                Serial.println("\n>>> Сброс модуля");
-                if (moduleReady) {
-                    dwm.reset();
-                    delay(100);
-                    moduleReady = dwm.begin();
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                }
-                break;
-                
-            case 'r':
-            case 'R':
-                Serial.println("\n>>> Перезагрузка ESP32...");
-                Serial.println("Перезагрузка через 1 секунду...");
-                Serial.flush();
-                delay(1000);
-                ESP.restart();
-                break;
-                
-            case 't':
-            case 'T':
-                Serial.println("\n>>> Выбран режим: TAG (мобильная метка)");
-                if (moduleReady) {
-                    currentMode = MODE_TAG;
-                    Serial.println("\n=== Инициализация TAG режима ===");
-                    Serial.printf("Мой адрес: 0x%04X\n", deviceShortAddress);
-                    dwm.setShortAddress(deviceShortAddress);
-                    dwm.enableReceiver();
-                    Serial.println("TAG готов к измерению расстояния");
-                    Serial.println("Отправка запросов каждые 500 мс...");
-                    Serial.println("Нажмите любую клавишу для возврата в меню\n");
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                }
-                break;
-                
-            case 'a':
-            case 'A':
-                Serial.println("\n>>> Выбран режим: ANCHOR (стационарный якорь)");
-                if (moduleReady) {
-                    currentMode = MODE_ANCHOR;
-                    Serial.println("\n=== Инициализация ANCHOR режима ===");
-                    Serial.printf("Мой адрес: 0x%04X\n", deviceShortAddress);
-                    dwm.setShortAddress(deviceShortAddress);
-                    dwm.enableReceiver();
-                    Serial.println("ANCHOR готов отвечать на запросы");
-                    Serial.println("Ожидание запросов от TAG...\n");
-                } else {
-                    Serial.println("✗ Модуль не готов!");
-                }
-                break;
-                
-            case 'm':
-            case 'M':
-                currentMode = MODE_MENU;
-                break;
-                
-            default:
-                if (currentMode == MODE_TRANSMITTER || 
-                    currentMode == MODE_RECEIVER || 
-                    currentMode == MODE_RANGING) {
-                    // Выход из активного режима
-                    Serial.println("\n>>> Возврат в меню");
-                    if (moduleReady) {
-                        dwm.disableTransceiver();
-                    }
-                    currentMode = MODE_MENU;
-                } else {
-                    Serial.println("Неизвестная команда. Нажмите 'm' для меню.");
-                }
-                break;
-        }
-        
-        if (currentMode == MODE_MENU) {
-            printMenu();
+#if DEVICE_MODE == MODE_TAG
+    /* ==================== TAG MODE (Initiator) ==================== */
+    
+    /* Clear ALL TX status bits at start of each iteration */
+    dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS | SYS_STATUS_TXPHS | SYS_STATUS_TXPRS | SYS_STATUS_TXFRB);
+    
+    static uint32_t loop_count = 0;
+    if (++loop_count % 10 == 0) {
+        Serial.print("🔄 [TAG] Loop iteration: ");
+        Serial.println(loop_count);
+    }
+    
+    /* Write frame data to DW1000 and prepare transmission. */
+    tx_poll_msg[ALL_MSG_SN_IDX] = frame_seq_nb;
+    dwt_writetxdata(sizeof(tx_poll_msg), tx_poll_msg, 0);
+    dwt_writetxfctrl(sizeof(tx_poll_msg), 0, 1);
+    
+    /* Start transmission, indicating that a response is expected. */
+    int ret = dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+    if (ret != DWT_SUCCESS) {
+        Serial.print("[TAG] TX failed! ret=");
+        Serial.println(ret);
+        delay(RNG_DELAY_MS);
+        return;
+    }
+    
+    /* Wait for TX to complete */
+    uint32_t tx_wait_start = millis();
+    while (!(dwt_read32bitreg(SYS_STATUS_ID) & SYS_STATUS_TXFRS)) {
+        if (millis() - tx_wait_start > 10) {
+            Serial.println("[TAG] TX timeout!");
+            delay(RNG_DELAY_MS);
+            return;
         }
     }
     
-    // Обработка активных режимов
-    static unsigned long lastAction = 0;
-    unsigned long now = millis();
-    
-    switch (currentMode) {
-        case MODE_TRANSMITTER:
-            if (now - lastAction >= 2000) {
-                lastAction = now;
-                
-                // Формирование тестовых данных
-                uint8_t testData[32];
-                testData[0] = 0xAA; // Заголовок
-                testData[1] = 0x55;
-                testData[2] = (now >> 24) & 0xFF; // Временная метка
-                testData[3] = (now >> 16) & 0xFF;
-                testData[4] = (now >> 8) & 0xFF;
-                testData[5] = now & 0xFF;
-                
-                // Счетчик пакетов
-                static uint16_t packetCount = 0;
-                testData[6] = (packetCount >> 8) & 0xFF;
-                testData[7] = packetCount & 0xFF;
-                packetCount++;
-                
-                // Заполнение оставшихся данных
-                for (int i = 8; i < 32; i++) {
-                    testData[i] = i;
-                }
-                
-                Serial.printf("\n[%lu мс] Пакет #%d:\n", now, packetCount - 1);
-                dwm.sendData(testData, 32);
-            }
-            break;
-            
-        case MODE_RECEIVER:
-            if (now - lastAction >= 100) {
-                lastAction = now;
-                
-                uint8_t rxBuffer[128];
-                uint16_t len = dwm.receiveData(rxBuffer, 128);
-                
-                if (len > 0) {
-                    Serial.printf("\n[%lu мс] Получен пакет:\n", now);
-                    
-                    // Расшифровка данных если это наш формат
-                    if (len >= 8 && rxBuffer[0] == 0xAA && rxBuffer[1] == 0x55) {
-                        uint32_t timestamp = (rxBuffer[2] << 24) | 
-                                            (rxBuffer[3] << 16) | 
-                                            (rxBuffer[4] << 8) | 
-                                            rxBuffer[5];
-                        uint16_t packetNum = (rxBuffer[6] << 8) | rxBuffer[7];
-                        
-                        Serial.printf("  Временная метка: %lu мс\n", timestamp);
-                        Serial.printf("  Номер пакета: %d\n", packetNum);
-                        Serial.printf("  Задержка: %lu мс\n", now - timestamp);
-                    }
-                }
-            }
-            break;
-            
-        case MODE_RANGING:
-            if (now - lastAction >= 500) {
-                lastAction = now;
-                
-                float distance = dwm.getDistance();
-                Serial.printf("[%lu мс] Расстояние: %.2f м\n", now, distance);
-            }
-            break;
-            
-        case MODE_TAG:
-            // TAG режим: отправляем запросы и измеряем расстояние
-            if (now - lastAction >= 500) {
-                lastAction = now;
-                
-                // Протокол TWR (Two-Way Ranging)
-                Serial.println("\n=== TWR Цикл измерения ===");
-                
-                // 1. Формируем и отправляем POLL запрос
-                uint8_t pollMsg[16];
-                pollMsg[0] = 0x41;  // Frame Control
-                pollMsg[1] = 0x88;
-                pollMsg[2] = now & 0xFF;  // Sequence number
-                pollMsg[3] = 0xFF;  // PAN ID
-                pollMsg[4] = 0xFF;
-                pollMsg[5] = 0xFF;  // Dest Address (broadcast)
-                pollMsg[6] = 0xFF;
-                pollMsg[7] = deviceShortAddress & 0xFF;  // Source Address
-                pollMsg[8] = (deviceShortAddress >> 8) & 0xFF;
-                pollMsg[9] = 0x01;  // Function Code: POLL
-                
-                Serial.printf("TAG [0x%04X]: Отправка POLL запроса...\n", deviceShortAddress);
-                dwm.sendData(pollMsg, 16);
-                
-                // 2. Ждем RESPONSE от ANCHOR
-                delay(10);  // Пауза для обработки на ANCHOR
-                uint8_t respBuffer[128];
-                uint16_t respLen = dwm.receiveData(respBuffer, 128);
-                
-                if (respLen >= 10 && respBuffer[9] == 0x02) {  // Function Code: RESPONSE
-                    uint16_t anchorAddr = respBuffer[7] | (respBuffer[8] << 8);
-                    Serial.printf("TAG: Получен RESPONSE от ANCHOR [0x%04X]\n", anchorAddr);
-                    
-                    // 3. Отправляем FINAL с меткой времени
-                    pollMsg[9] = 0x03;  // Function Code: FINAL
-                    Serial.println("TAG: Отправка FINAL...");
-                    dwm.sendData(pollMsg, 16);
-                    
-                    // 4. Простой расчет расстояния (без точных меток времени)
-                    // Для точного TWR нужны метки времени из TX_TIME/RX_TIME регистров
-                    Serial.println("TAG: Расчет расстояния...");
-                    float distance = dwm.getDistance();
-                    
-                    Serial.printf("✓ Расстояние до ANCHOR [0x%04X]: %.2f м\n", anchorAddr, distance);
-                } else {
-                    Serial.println("✗ TAG: Нет ответа от ANCHOR");
-                }
-                
-                Serial.println("===================\n");
-            }
-            break;
-            
-        case MODE_ANCHOR:
-            // ANCHOR режим: ожидаем запросы и отвечаем
-            if (now - lastAction >= 50) {
-                lastAction = now;
-                
-                uint8_t rxBuffer[128];
-                uint16_t len = dwm.receiveData(rxBuffer, 128);
-                
-                if (len >= 10 && rxBuffer[9] == 0x01) {  // Function Code: POLL
-                    uint16_t tagAddr = rxBuffer[7] | (rxBuffer[8] << 8);
-                    Serial.printf("\nANCHOR [0x%04X]: Получен POLL от TAG [0x%04X]\n", 
-                                  deviceShortAddress, tagAddr);
-                    
-                    // Отправляем RESPONSE
-                    uint8_t respMsg[16];
-                    respMsg[0] = 0x41;
-                    respMsg[1] = 0x88;
-                    respMsg[2] = rxBuffer[2];  // Echo sequence number
-                    respMsg[3] = 0xFF;
-                    respMsg[4] = 0xFF;
-                    respMsg[5] = tagAddr & 0xFF;  // Dest = TAG
-                    respMsg[6] = (tagAddr >> 8) & 0xFF;
-                    respMsg[7] = deviceShortAddress & 0xFF;  // Source = ANCHOR
-                    respMsg[8] = (deviceShortAddress >> 8) & 0xFF;
-                    respMsg[9] = 0x02;  // Function Code: RESPONSE
-                    
-                    delay(5);  // Короткая пауза перед ответом
-                    Serial.println("ANCHOR: Отправка RESPONSE...");
-                    dwm.sendData(respMsg, 16);
-                    
-                    // Ждем FINAL от TAG
-                    delay(15);
-                    len = dwm.receiveData(rxBuffer, 128);
-                    if (len >= 10 && rxBuffer[9] == 0x03) {  // Function Code: FINAL
-                        Serial.println("ANCHOR: Получен FINAL");
-                        Serial.println("✓ TWR цикл завершен\n");
-                    }
-                }
-            }
-            break;
-            
-        default:
-            break;
+    if (loop_count % 10 == 0) {
+        Serial.println("[TAG] ✓ POLL transmitted");
     }
     
-    delay(10);
+    /* Increment frame sequence number after transmission (modulo 256). */
+    frame_seq_nb++;
+    
+    /* Poll for reception of a frame or error/timeout. */
+    uint32_t rx_wait_start = millis();
+    uint32_t last_debug = rx_wait_start;
+    while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR))) {
+        uint32_t now = millis();
+        if (now - last_debug >= 500) {  // Every 500ms print status
+            Serial.print("[TAG] RX wait ");
+            Serial.print(now - rx_wait_start);
+            Serial.print("ms, Status: 0x");
+            Serial.print(status_reg, HEX);
+            Serial.print(", SYS_STATE: 0x");
+            Serial.println(dwt_read32bitreg(SYS_STATE_ID), HEX);
+            last_debug = now;
+        }
+    }
+    Serial.print("[TAG] RX done after ");
+    Serial.print(millis() - rx_wait_start);
+    Serial.print("ms, Final Status: 0x");
+    Serial.println(status_reg, HEX);
+    
+    if (status_reg & SYS_STATUS_RXFCG) {
+        uint32 frame_len;
+        
+        /* Clear good RX frame event. */
+        dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_RXFCG);
+        
+        /* A frame has been received, read it into the local buffer. */
+        frame_len = dwt_read32bitreg(RX_FINFO_ID) & RX_FINFO_RXFLEN_MASK;
+        if (frame_len <= RX_BUF_LEN) {
+            dwt_readrxdata(rx_buffer, frame_len, 0);
+        }
+
+        
+        /* Check that the frame is the expected response. */
+        rx_buffer[ALL_MSG_SN_IDX] = 0;
+        if (memcmp(rx_buffer, rx_resp_msg, ALL_MSG_COMMON_LEN) == 0) {
+            uint32 poll_tx_ts, resp_rx_ts, poll_rx_ts, resp_tx_ts;
+            int32 rtd_init, rtd_resp;
+            float clockOffsetRatio;
+            
+            /* Retrieve poll transmission and response reception timestamps. */
+            poll_tx_ts = dwt_readtxtimestamplo32();
+            resp_rx_ts = dwt_readrxtimestamplo32();
+            
+            /* Read carrier integrator value and calculate clock offset ratio. */
+            clockOffsetRatio = dwt_readcarrierintegrator() * (FREQ_OFFSET_MULTIPLIER * HERTZ_TO_PPM_MULTIPLIER_CHAN_2 / 1.0e6);
+            
+            /* Get timestamps embedded in response message. */
+            resp_msg_get_ts(&rx_buffer[RESP_MSG_POLL_RX_TS_IDX], &poll_rx_ts);
+            resp_msg_get_ts(&rx_buffer[RESP_MSG_RESP_TX_TS_IDX], &resp_tx_ts);
+            
+            /* Compute time of flight and distance. */
+            rtd_init = resp_rx_ts - poll_tx_ts;
+            rtd_resp = resp_tx_ts - poll_rx_ts;
+            
+            tof = ((rtd_init - rtd_resp * (1 - clockOffsetRatio)) / 2.0) * DWT_TIME_UNITS;
+            distance = tof * SPEED_OF_LIGHT;
+            
+            /* Display computed distance. */
+            success_count++;
+            Serial.print("✓ Distance: ");
+            Serial.print(distance, 2);
+            Serial.println(" m");
+        }
+        
+        /* Force DW1000 back to IDLE after successful RX */
+        dwt_forcetrxoff();
+    } else {
+        /* Clear RX error/timeout events in the DW1000 status register. */
+        if (status_reg & SYS_STATUS_ALL_RX_TO) {
+            timeout_count++;
+            if (timeout_count % 10 == 0) {
+                Serial.print("[TAG] RX Timeout! Status: 0x");
+                Serial.println(status_reg, HEX);
+            }
+        } else {
+            error_count++;
+            Serial.print("[TAG] RX Error! Status: 0x");
+            Serial.print(status_reg, HEX);
+            if (status_reg & SYS_STATUS_RXPHE) Serial.print(" RXPHE");
+            if (status_reg & SYS_STATUS_RXRFSL) Serial.print(" RXRFSL");
+            if (status_reg & SYS_STATUS_LDEERR) Serial.print(" LDEERR");
+            Serial.println();
+        }
+        Serial.print("✓ KEK: ");
+        dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
+        
+        /* Reset RX to properly reinitialise LDE operation. */
+        dwt_rxreset();
+    }
+    
+    /* Print statistics every 1000ms */
+    uint32 now = millis();
+    if (now - last_stats_time >= 1000) {
+        Serial.print("[TAG] Stats - Success: ");
+        Serial.print(success_count);
+        Serial.print(", Timeout: ");
+        Serial.print(timeout_count);
+        Serial.print(", Error: ");
+        Serial.println(error_count);
+        last_stats_time = now;
+    }
+    
+    /* Execute a delay between ranging exchanges. */
+    delay(RNG_DELAY_MS);
+    
+#else
+    /* ==================== ANCHOR MODE (Responder) ==================== */
+    
+    /* Clear all status bits before starting RX */
+    dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_GOOD | SYS_STATUS_ALL_RX_ERR | SYS_STATUS_ALL_RX_TO);
+    
+    /* Activate reception immediately */
+    dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    
+    /* Poll for reception of a frame or error/timeout */
+    while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG | SYS_STATUS_ALL_RX_ERR)))
+    { };
+    
+    if (status_reg & SYS_STATUS_RXFCG) {
+        uint32 frame_len;
+        
+        /* Clear good RX frame event in the DW1000 status register in the DW1000 status register. */
+        dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_RXFCG);
+        
+        /* A frame has been received, read it into the local buffer. */
+        frame_len = dwt_read32bitreg(RX_FINFO_ID) & RX_FINFO_RXFLEN_MASK;
+        if (frame_len <= RX_BUF_LEN) {
+            dwt_readrxdata(rx_buffer, frame_len, 0);
+        }
+        
+        /* Check that the frame is a poll sent by "SS TWR initiator" example.
+         * As the sequence number field of the frame is not relevant, it is cleared to simplify the validation of the frame. */
+        uint8 saved_seq = rx_buffer[ALL_MSG_SN_IDX];
+        rx_buffer[ALL_MSG_SN_IDX] = 0;
+        
+        if (memcmp(rx_buffer, rx_poll_msg, ALL_MSG_COMMON_LEN) == 0) {
+            uint32 resp_tx_time;
+            int ret;
+            
+            /* Retrieve poll reception timestamp. */
+            poll_rx_ts = get_rx_timestamp_u64();
+            
+            /* Compute final message transmission time. */
+            resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
+            dwt_setdelayedtrxtime(resp_tx_time);
+            
+            /* Response TX timestamp is the transmission time we programmed plus the antenna delay. */
+            resp_tx_ts = (((uint64)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+            
+            /* Write all timestamps in the response message. */
+            resp_msg_set_ts(&tx_resp_msg[RESP_MSG_POLL_RX_TS_IDX], poll_rx_ts);
+            resp_msg_set_ts(&tx_resp_msg[RESP_MSG_RESP_TX_TS_IDX], resp_tx_ts);
+            
+            /* Write and send the response message. */
+            tx_resp_msg[ALL_MSG_SN_IDX] = saved_seq;
+            dwt_writetxdata(sizeof(tx_resp_msg), tx_resp_msg, 0);
+            dwt_writetxfctrl(sizeof(tx_resp_msg), 0, 1);
+            ret = dwt_starttx(DWT_START_TX_DELAYED);
+            
+            /* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. */
+            if (ret == DWT_SUCCESS) {
+                /* Poll DW1000 until TX frame sent event set. */
+                while (!(dwt_read32bitreg(SYS_STATUS_ID) & SYS_STATUS_TXFRS))
+                { };
+                
+                /* Clear TXFRS event. */
+                dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS);
+                
+                /* Increment frame sequence number after transmission of the response message (modulo 256). */
+                frame_seq_nb++;
+                success_count++;
+            } else {
+                error_count++;
+            }
+        }
+    } else {
+        /* Clear RX error events in the DW1000 status register. */
+        dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_ERR);
+        
+        /* Reset RX to properly reinitialise LDE operation. */
+        dwt_rxreset();
+        error_count++;
+    }
+    
+    /* Print statistics every 1000ms */
+    uint32 now = millis();
+    if (now - last_stats_time >= 1000) {
+        Serial.print("[ANCHOR] Stats - RX: ");
+        Serial.print(success_count);
+        Serial.print(", Err: ");
+        Serial.println(error_count);
+        last_stats_time = now;
+    }
+#endif
 }
 
-// Функция повтора строки
-String repeat(const char* str, int count) {
-    String result = "";
-    for (int i = 0; i < count; i++) {
-        result += str;
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn resp_msg_get_ts()
+ *
+ * @brief Read a given timestamp value from the response message.
+ */
+static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts)
+{
+    int i;
+    *ts = 0;
+    for (i = 0; i < RESP_MSG_TS_LEN; i++)
+    {
+        *ts += ts_field[i] << (i * 8);
     }
-    return result;
+}
+
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn get_rx_timestamp_u64()
+ *
+ * @brief Get the RX time-stamp in a 64-bit variable.
+ */
+static uint64 get_rx_timestamp_u64(void)
+{
+    uint8 ts_tab[5];
+    uint64 ts = 0;
+    int i;
+    dwt_readrxtimestamp(ts_tab);
+    for (i = 4; i >= 0; i--)
+    {
+        ts <<= 8;
+        ts |= ts_tab[i];
+    }
+    return ts;
+}
+
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn resp_msg_set_ts()
+ *
+ * @brief Fill a given timestamp field in the response message with the given value.
+ */
+static void resp_msg_set_ts(uint8 *ts_field, const uint64 ts)
+{
+    int i;
+    for (i = 0; i < RESP_MSG_TS_LEN; i++)
+    {
+        ts_field[i] = (ts >> (i * 8)) & 0xFF;
+    }
 }

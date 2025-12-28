@@ -1,0 +1,595 @@
+/**
+ * @file main.cpp
+ * @brief Тестовая программа для модуля DWM1000 на ESP32-C3
+ * 
+ * Эта программа демонстрирует различные режимы работы модуля DWM1000:
+ * - Инициализация и проверка связи
+ * - Режим передатчика
+ * - Режим приемника
+ * - Режим измерения расстояния
+ * 
+ * Для управления используется Serial Monitor (115200 baud)
+ */
+
+#include <Arduino.h>
+#include "DWM1000.h"
+
+DWM1000 dwm;
+
+// Режимы работы
+enum TestMode {
+    MODE_INIT,          // Начальная инициализация
+    MODE_INFO,          // Вывод информации о модуле
+    MODE_TEST_COMM,     // Тест коммуникации
+    MODE_TRANSMITTER,   // Режим передатчика
+    MODE_RECEIVER,      // Режим приемника
+    MODE_RANGING,       // Режим измерения расстояния (старый)
+    MODE_TAG,           // TAG режим (мобильная метка для TWR)
+    MODE_ANCHOR,        // ANCHOR режим (стационарный якорь для TWR)
+    MODE_MENU           // Показать меню
+};
+
+TestMode currentMode = MODE_INIT;
+bool moduleReady = false;
+
+// Уникальный адрес устройства на основе MAC-адреса ESP32
+uint16_t deviceShortAddress = 0x0000;
+uint8_t deviceMAC[6];
+
+// Объявление функции повтора строки
+String repeat(const char* str, int count);
+
+void printMenu() {
+    Serial.println("\n╔════════════════════════════════════════════╗");
+    Serial.println("║   МЕНЮ ТЕСТИРОВАНИЯ МОДУЛЯ DWM1000         ║");
+    Serial.println("╠════════════════════════════════════════════╣");
+    Serial.println("║ 1 - Информация о модуле                    ║");
+    Serial.println("║ 2 - Тест коммуникации                      ║");
+    Serial.println("║ 3 - Дамп регистров                         ║");
+    Serial.println("║ 4 - Режим передатчика (тестовые данные)    ║");
+    Serial.println("║ 5 - Режим приемника (ожидание данных)      ║");
+    Serial.println("║ 6 - Настройка канала                       ║");
+    Serial.println("║ 7 - Сброс модуля                           ║");
+    Serial.println("║                                            ║");
+    Serial.println("║ === TWR ИЗМЕРЕНИЕ РАССТОЯНИЯ ===           ║");
+    Serial.println("║ t - TAG режим (мобильная метка)            ║");
+    Serial.println("║ a - ANCHOR режим (стационарный якорь)      ║");
+    Serial.println("║                                            ║");
+    Serial.println("║ r - Перезагрузка ESP32                     ║");
+    Serial.println("║ m - Показать это меню                      ║");
+    Serial.println("╚════════════════════════════════════════════╝");
+    Serial.printf("\nМой адрес: 0x%04X (MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n", 
+                  deviceShortAddress, 
+                  deviceMAC[0], deviceMAC[1], deviceMAC[2], 
+                  deviceMAC[3], deviceMAC[4], deviceMAC[5]);
+    Serial.println("\nВведите команду:");
+}
+
+void setup() {
+    // Инициализация Serial
+    Serial.begin(115200);
+    delay(2000);  // Увеличена задержка для инициализации Serial
+    
+    Serial.println("\n\n");
+    Serial.println("================================================");
+    Serial.println("  ТЕСТИРОВАНИЕ МОДУЛЯ DWM1000 НА ESP32-C3");
+    Serial.println("  Ultra-Wideband (UWB) модуль от Qorvo/Decawave");
+    Serial.println("================================================");
+    Serial.println();
+    Serial.println(">>> Serial Monitor подключен! <<<");
+    
+    // Получаем MAC-адрес ESP32 для уникальной идентификации
+    esp_read_mac(deviceMAC, ESP_MAC_WIFI_STA);
+    // Используем младшие 2 байта MAC как короткий адрес
+    deviceShortAddress = (deviceMAC[4] << 8) | deviceMAC[5];
+    Serial.printf("\nMAC-адрес: %02X:%02X:%02X:%02X:%02X:%02X\n", 
+                  deviceMAC[0], deviceMAC[1], deviceMAC[2], 
+                  deviceMAC[3], deviceMAC[4], deviceMAC[5]);
+    Serial.printf("Короткий адрес устройства: 0x%04X\n", deviceShortAddress);
+    
+    Serial.println("\nИнформация о плате:");
+    Serial.printf("  Модель: ESP32-C3 Super Mini\n");
+    Serial.printf("  Частота CPU: %d МГц\n", ESP.getCpuFreqMHz());
+    Serial.printf("  Flash: %d байт\n", ESP.getFlashChipSize());
+    Serial.printf("  Free Heap: %d байт\n", ESP.getFreeHeap());
+    
+    // Инициализация модуля DWM1000
+    Serial.println("\n================================================");
+    Serial.println("Начинается инициализация модуля DWM1000...");
+    Serial.println("================================================\n");
+    
+    moduleReady = dwm.begin();
+    
+    Serial.println("\n================================================");
+    Serial.println("Инициализация завершена");
+    Serial.println("================================================");
+    
+    if (moduleReady) {
+        Serial.println("\n✓ МОДУЛЬ ГОТОВ К РАБОТЕ!\n");
+        dwm.printDeviceInfo();
+        printMenu();
+    } else {
+        Serial.println("\n✗ ОШИБКА ИНИЦИАЛИЗАЦИИ!");
+        Serial.println("\nПроверьте:");
+        Serial.println("  1. Правильность подключения проводов");
+        Serial.println("  2. Питание модуля (3.3V)");
+        Serial.println("  3. Соответствие пинов в DWM1000.h");
+        Serial.println("\nПерезагрузите плату после исправления...");
+    }
+}
+
+void loop() {
+    // Проверка команд из Serial
+    if (Serial.available()) {
+        char cmd = Serial.read();
+        
+        // Очистка буфера
+        while (Serial.available()) Serial.read();
+        
+        switch (cmd) {
+            case '1':
+                Serial.println("\n>>> Выбран режим: Информация о модуле");
+                if (moduleReady) {
+                    dwm.printDeviceInfo();
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case '2':
+                Serial.println("\n>>> Выбран режим: Тест коммуникации");
+                if (moduleReady) {
+                    dwm.testCommunication();
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case '3':
+                Serial.println("\n>>> Выбран режим: Дамп регистров");
+                if (moduleReady) {
+                    dwm.printRegisters();
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case '4':
+                Serial.println("\n>>> Выбран режим: Передатчик");
+                currentMode = MODE_TRANSMITTER;
+                if (moduleReady) {
+                    dwm.enableTransmitter();
+                    Serial.println("Отправка данных каждые 2 секунды...");
+                    Serial.println("Нажмите любую клавишу для возврата в меню");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                    currentMode = MODE_MENU;
+                }
+                break;
+                
+            case '5':
+                Serial.println("\n>>> Выбран режим: Приемник");
+                currentMode = MODE_RECEIVER;
+                if (moduleReady) {
+                    dwm.enableReceiver();
+                    Serial.println("Ожидание данных...");
+                    Serial.println("Нажмите любую клавишу для возврата в меню");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                    currentMode = MODE_MENU;
+                }
+                break;
+                
+            case '6':
+                Serial.println("\n>>> Выбран режим: Измерение расстояния");
+                currentMode = MODE_RANGING;
+                if (moduleReady) {
+                    dwm.initRanging();
+                    Serial.println("Режим TWR активирован");
+                    Serial.println("Нажмите любую клавишу для возврата в меню");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                    currentMode = MODE_MENU;
+                }
+                break;
+                
+            case '7': {
+                Serial.println("\n>>> Настройка канала");
+                Serial.println("Доступные каналы: 1, 2, 3, 4, 5, 7");
+                Serial.println("Введите номер канала:");
+                
+                while (!Serial.available()) delay(10);
+                uint8_t channel = Serial.parseInt();
+                while (Serial.available()) Serial.read();
+                
+                if (moduleReady && (channel >= 1 && channel <= 7 && channel != 6)) {
+                    dwm.setChannel(channel);
+                } else {
+                    Serial.println("✗ Неверный канал или модуль не готов!");
+                }
+                break;
+            }
+                
+            case '8':
+                Serial.println("\n>>> Сброс модуля");
+                if (moduleReady) {
+                    dwm.reset();
+                    delay(100);
+                    moduleReady = dwm.begin();
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case 'r':
+            case 'R':
+                Serial.println("\n>>> Перезагрузка ESP32...");
+                Serial.println("Перезагрузка через 1 секунду...");
+                Serial.flush();
+                delay(1000);
+                ESP.restart();
+                break;
+                
+            case 't':
+            case 'T':
+                Serial.println("\n>>> Выбран режим: TAG (мобильная метка)");
+                if (moduleReady) {
+                    currentMode = MODE_TAG;
+                    Serial.println("\n=== Инициализация TAG режима ===");
+                    Serial.printf("Мой адрес: 0x%04X\n", deviceShortAddress);
+                    dwm.setShortAddress(deviceShortAddress);
+                    dwm.enableReceiver();
+                    Serial.println("TAG готов к измерению расстояния");
+                    Serial.println("Отправка запросов каждые 500 мс...");
+                    Serial.println("Нажмите любую клавишу для возврата в меню\n");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case 'a':
+            case 'A':
+                Serial.println("\n>>> Выбран режим: ANCHOR (стационарный якорь)");
+                if (moduleReady) {
+                    currentMode = MODE_ANCHOR;
+                    Serial.println("\n=== Инициализация ANCHOR режима ===");
+                    Serial.printf("Мой адрес: 0x%04X\n", deviceShortAddress);
+                    dwm.setShortAddress(deviceShortAddress);
+                    
+                    // Сбрасываем все флаги
+                    uint32_t clearStatus = 0xFFFFFFFF;
+                    uint8_t clearBuf[4];
+                    clearBuf[0] = clearStatus & 0xFF;
+                    clearBuf[1] = (clearStatus >> 8) & 0xFF;
+                    clearBuf[2] = (clearStatus >> 16) & 0xFF;
+                    clearBuf[3] = (clearStatus >> 24) & 0xFF;
+                    
+                    // Включаем приемник
+                    dwm.enableReceiver();
+                    
+                    Serial.println("✓ ANCHOR готов принимать POLL");
+                    Serial.println("Ожидание пакетов от TAG...\n");
+                } else {
+                    Serial.println("✗ Модуль не готов!");
+                }
+                break;
+                
+            case 'm':
+            case 'M':
+                currentMode = MODE_MENU;
+                break;
+                
+            default:
+                if (currentMode == MODE_TRANSMITTER || 
+                    currentMode == MODE_RECEIVER || 
+                    currentMode == MODE_RANGING) {
+                    // Выход из активного режима
+                    Serial.println("\n>>> Возврат в меню");
+                    if (moduleReady) {
+                        dwm.disableTransceiver();
+                    }
+                    currentMode = MODE_MENU;
+                } else {
+                    Serial.println("Неизвестная команда. Нажмите 'm' для меню.");
+                }
+                break;
+        }
+        
+        if (currentMode == MODE_MENU) {
+            printMenu();
+        }
+    }
+    
+    // Обработка активных режимов
+    static unsigned long lastAction = 0;
+    unsigned long now = millis();
+    
+    switch (currentMode) {
+        case MODE_TRANSMITTER:
+            if (now - lastAction >= 2000) {
+                lastAction = now;
+                
+                // Формирование тестовых данных
+                uint8_t testData[32];
+                testData[0] = 0xAA; // Заголовок
+                testData[1] = 0x55;
+                testData[2] = (now >> 24) & 0xFF; // Временная метка
+                testData[3] = (now >> 16) & 0xFF;
+                testData[4] = (now >> 8) & 0xFF;
+                testData[5] = now & 0xFF;
+                
+                // Счетчик пакетов
+                static uint16_t packetCount = 0;
+                testData[6] = (packetCount >> 8) & 0xFF;
+                testData[7] = packetCount & 0xFF;
+                packetCount++;
+                
+                // Заполнение оставшихся данных
+                for (int i = 8; i < 32; i++) {
+                    testData[i] = i;
+                }
+                
+                Serial.printf("\n[%lu мс] Пакет #%d:\n", now, packetCount - 1);
+                dwm.sendData(testData, 32);
+            }
+            break;
+            
+        case MODE_RECEIVER:
+            if (now - lastAction >= 100) {
+                lastAction = now;
+                
+                uint8_t rxBuffer[128];
+                uint16_t len = dwm.receiveData(rxBuffer, 128);
+                
+                if (len > 0) {
+                    Serial.printf("\n[%lu мс] Получен пакет:\n", now);
+                    
+                    // Расшифровка данных если это наш формат
+                    if (len >= 8 && rxBuffer[0] == 0xAA && rxBuffer[1] == 0x55) {
+                        uint32_t timestamp = (rxBuffer[2] << 24) | 
+                                            (rxBuffer[3] << 16) | 
+                                            (rxBuffer[4] << 8) | 
+                                            rxBuffer[5];
+                        uint16_t packetNum = (rxBuffer[6] << 8) | rxBuffer[7];
+                        
+                        Serial.printf("  Временная метка: %lu мс\n", timestamp);
+                        Serial.printf("  Номер пакета: %d\n", packetNum);
+                        Serial.printf("  Задержка: %lu мс\n", now - timestamp);
+                    }
+                }
+            }
+            break;
+            
+        case MODE_RANGING:
+            if (now - lastAction >= 500) {
+                lastAction = now;
+                
+                float distance = dwm.getDistance();
+                Serial.printf("[%lu мс] Расстояние: %.2f м\n", now, distance);
+            }
+            break;
+            
+        case MODE_TAG:
+            // TAG режим: УПРОЩЕННЫЙ TWR
+            if (now - lastAction >= 1000) {
+                lastAction = now;
+                
+                Serial.println("\n=== TWR Цикл ===");
+                
+                // Проверяем связь с модулем
+                uint32_t testStatus = dwm.getStatus();
+                if (testStatus == 0xFFFFFFFF || testStatus == 0) {
+                    Serial.printf("✗ Модуль не отвечает! (status=0x%08X)\n", testStatus);
+                    Serial.println("Перезапуск модуля...");
+                    dwm.reset();
+                    delay(100);
+                    if (!dwm.begin()) {
+                        Serial.println("✗ Не удалось перезапустить!");
+                        moduleReady = false;
+                        currentMode = MODE_MENU;
+                    }
+                    Serial.println("===================\n");
+                    break;
+                }
+                
+                // Формируем POLL
+                static uint8_t seqNum = 0;
+                uint8_t pollMsg[12];
+                pollMsg[0] = 0x41;
+                pollMsg[1] = 0x88;
+                pollMsg[2] = seqNum++;
+                pollMsg[3] = 0xCA;
+                pollMsg[4] = 0xDE;
+                pollMsg[5] = 'W';
+                pollMsg[6] = 'A';
+                pollMsg[7] = 'V';
+                pollMsg[8] = 'E';
+                pollMsg[9] = 0xE0;  // POLL
+                pollMsg[10] = 0;
+                pollMsg[11] = 0;
+                
+                Serial.printf("TAG: TX POLL #%d\n", pollMsg[2]);
+                
+                // Простая отправка (без WAIT4RESP)
+                dwm.sendData(pollMsg, 12);
+                
+                // Задержка для TX
+                delay(5);
+                
+                // Проверяем что передача завершилась
+                uint32_t statusAfterTx = dwm.getStatus();
+                Serial.printf("TX status: 0x%08X\n", statusAfterTx);
+                
+                if (statusAfterTx == 0xFFFFFFFF) {
+                    Serial.println("✗ SPI ERROR!");
+                    Serial.println("===================\n");
+                    break;
+                }
+                
+                // Включаем приемник вручную
+                dwm.enableReceiver();
+                
+                // Ждем RESPONSE
+                bool gotResponse = false;
+                unsigned long waitStart = millis();
+                while (millis() - waitStart < 200) {
+                    uint32_t rxStatus = dwm.getStatus();
+                    
+                    if (rxStatus & 0x00002000) {  // RXFCG
+                        Serial.printf("RX: Пакет получен! Status=0x%08X\n", rxStatus);
+                        
+                        uint8_t rxBuffer[20];
+                        uint16_t rxLen = dwm.readReceivedData(rxBuffer, 20);
+                        
+                        if (rxLen > 0) {
+                            // Полный пакет
+                            Serial.printf("Пакет (%d): ", rxLen);
+                            for (int i = 0; i < rxLen; i++) {
+                                Serial.printf("%02X ", rxBuffer[i]);
+                            }
+                            Serial.println();
+                            
+                            // Проверяем что это RESPONSE (0xE1)
+                            if (rxLen >= 10 && rxBuffer[9] == 0xE1) {
+                                Serial.println("✓ RESPONSE получен!");
+                                gotResponse = true;
+                            } else {
+                                Serial.printf("✗ Не RESPONSE (func=0x%02X)\n", 
+                                            rxLen >= 10 ? rxBuffer[9] : 0);
+                            }
+                        } else {
+                            Serial.println("✗ Пустой пакет");
+                        }
+                        
+                        dwm.clearRxStatus();
+                        break;
+                    } else if (rxStatus & 0x60000000) {  // RX_ERR | RX_TO
+                        Serial.printf("RX: Error/Timeout (0x%08X)\n", rxStatus);
+                        dwm.clearRxError();
+                        break;
+                    }
+                    
+                    delay(10);
+                }
+                
+                if (!gotResponse) {
+                    Serial.println("✗ Нет ответа");
+                }
+                
+                Serial.println("===================\n");
+            }
+            break;
+            
+        case MODE_ANCHOR:
+            // ANCHOR режим - простой ответчик
+            {
+                static bool rxEnabled = false;
+                static unsigned long lastDebug = 0;
+                
+                if (!rxEnabled) {
+                    dwm.enableReceiver();
+                    rxEnabled = true;
+                    Serial.println("✓ RX активирован\n");
+                }
+                
+                // Показываем что живы каждые 5 сек
+                if (now - lastDebug >= 5000) {
+                    lastDebug = now;
+                    uint32_t status = dwm.getStatus();
+                    Serial.printf("[%lu] ANCHOR слушает... Status=0x%08X", now, status);
+                    
+                    // Расшифровка статуса
+                    if (status & 0x02000000) Serial.print(" RXSFDD");  // SFD detected!
+                    if (status & 0x00002000) Serial.print(" RXFCG");   // Good frame
+                    if (status & 0x00008000) Serial.print(" RXFCE");   // CRC error
+                    if (status & 0x00004000) Serial.print(" RXRFSL");  // Reed Solomon error
+                    if (status & 0x10000000) Serial.print(" RXPTO");   // Preamble timeout
+                    if (status & 0x20000000) Serial.print(" RXSFDTO"); // SFD timeout
+                    if (status & 0x40000000) Serial.print(" RXRFTO");  // Frame timeout
+                    Serial.println();
+                }
+                
+                // Проверяем статус
+                uint32_t statusReg = dwm.getStatus();
+                
+                if (statusReg & 0x00002000) {  // RXFCG
+                    Serial.printf("\n[%lu] ✓ ПАКЕТ ПОЛУЧЕН! Status=0x%08X\n", millis(), statusReg);
+                    
+                    uint8_t rxBuffer[20];
+                    uint16_t frameLen = dwm.readReceivedData(rxBuffer, 20);
+                    
+                    if (frameLen > 0) {
+                        Serial.printf("Пакет (%d): ", frameLen);
+                        for (int i = 0; i < frameLen; i++) {
+                            Serial.printf("%02X ", rxBuffer[i]);
+                        }
+                        Serial.println();
+                        
+                        // Проверяем это POLL?
+                        bool isPoll = false;
+                        for (int i = 0; i <= (int)frameLen - 4; i++) {
+                            if (rxBuffer[i] == 'W' && rxBuffer[i+1] == 'A' && 
+                                rxBuffer[i+2] == 'V' && rxBuffer[i+3] == 'E') {
+                                if (i + 4 < frameLen && rxBuffer[i+4] == 0xE0) {
+                                    isPoll = true;
+                                    Serial.println("→ Это POLL!");
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (isPoll) {
+                            // Формируем RESPONSE
+                            uint8_t respMsg[12];
+                            respMsg[0] = 0x41;
+                            respMsg[1] = 0x88;
+                            respMsg[2] = frameLen >= 3 ? rxBuffer[2] : 0;
+                            respMsg[3] = 0xCA;
+                            respMsg[4] = 0xDE;
+                            respMsg[5] = 'V';
+                            respMsg[6] = 'E';
+                            respMsg[7] = 'W';
+                            respMsg[8] = 'A';
+                            respMsg[9] = 0xE1;  // RESPONSE
+                            respMsg[10] = 0;
+                            respMsg[11] = 0;
+                            
+                            Serial.println("→ TX RESPONSE...");
+                            
+                            // Небольшая задержка перед ответом
+                            delay(5);
+                            dwm.sendData(respMsg, 12);
+                        }
+                    }
+                    
+                    // Очищаем и снова включаем RX
+                    dwm.clearRxStatus();
+                    dwm.enableReceiver();
+                    
+                } else if (statusReg & 0x60000000) {  // RX_ERR
+                    if (now - lastAction >= 10000) {
+                        lastAction = now;
+                        Serial.printf("RX error (0x%08X), reset\n", statusReg);
+                    }
+                    dwm.clearRxError();
+                    dwm.rxReset();
+                    dwm.enableReceiver();
+                }
+            }
+            break;
+            
+        default:
+            break;
+    }
+    
+    delay(10);
+}
+
+// Функция повтора строки
+String repeat(const char* str, int count) {
+    String result = "";
+    for (int i = 0; i < count; i++) {
+        result += str;
+    }
+    return result;
+}
