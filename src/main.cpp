@@ -314,9 +314,9 @@ void loop() {
         dwt_rxreset();
     }
     
-    /* Print statistics every 1000ms */
+    /* Print statistics every 10 seconds */
     uint32 now = millis();
-    if (now - last_stats_time >= 1000) {
+    if (now - last_stats_time >= 10000) {
         Serial.print("[TAG] Stats - Success: ");
         Serial.print(success_count);
         Serial.print(", Timeout: ");
@@ -411,9 +411,9 @@ void loop() {
         error_count++;
     }
     
-    /* Print statistics every 1000ms */
+    /* Print statistics every 10 seconds */
     uint32 now = millis();
-    if (now - last_stats_time >= 1000) {
+    if (now - last_stats_time >= 10000) {
         Serial.print("[ANCHOR] Stats - RX: ");
         Serial.print(success_count);
         Serial.print(", Err: ");
