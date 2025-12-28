@@ -34,7 +34,7 @@
 #define APP_NAME "SS TWR " DEVICE_NAME
 
 /* Inter-ranging delay period, in milliseconds. */
-#define RNG_DELAY_MS 1000
+#define RNG_DELAY_MS 100
 
 /* Default communication configuration. We use here EVK1000's mode 4. */
 static dwt_config_t config = {
@@ -202,7 +202,7 @@ void loop() {
     dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS | SYS_STATUS_TXPHS | SYS_STATUS_TXPRS | SYS_STATUS_TXFRB);
     
     static uint32_t loop_count = 0;
-    if (++loop_count % 10 == 0) {
+    if (++loop_count % 100 == 0) {
         Serial.print("🔄 [TAG] Loop iteration: ");
         Serial.println(loop_count);
     }
@@ -239,24 +239,8 @@ void loop() {
     frame_seq_nb++;
     
     /* Poll for reception of a frame or error/timeout. */
-    uint32_t rx_wait_start = millis();
-    uint32_t last_debug = rx_wait_start;
-    while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR))) {
-        uint32_t now = millis();
-        if (now - last_debug >= 500) {  // Every 500ms print status
-            Serial.print("[TAG] RX wait ");
-            Serial.print(now - rx_wait_start);
-            Serial.print("ms, Status: 0x");
-            Serial.print(status_reg, HEX);
-            Serial.print(", SYS_STATE: 0x");
-            Serial.println(dwt_read32bitreg(SYS_STATE_ID), HEX);
-            last_debug = now;
-        }
-    }
-    Serial.print("[TAG] RX done after ");
-    Serial.print(millis() - rx_wait_start);
-    Serial.print("ms, Final Status: 0x");
-    Serial.println(status_reg, HEX);
+    while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR)))
+    { };
     
     if (status_reg & SYS_STATUS_RXFCG) {
         uint32 frame_len;
@@ -296,11 +280,13 @@ void loop() {
             tof = ((rtd_init - rtd_resp * (1 - clockOffsetRatio)) / 2.0) * DWT_TIME_UNITS;
             distance = tof * SPEED_OF_LIGHT;
             
-            /* Display computed distance. */
+            /* Display computed distance in Teleplot format with timestamp and unit. */
             success_count++;
-            Serial.print("✓ Distance: ");
+            Serial.print(">distance:");
+            Serial.print(millis());
+            Serial.print(":");
             Serial.print(distance, 2);
-            Serial.println(" m");
+            Serial.println("§m");
         }
         
         /* Force DW1000 back to IDLE after successful RX */
@@ -322,7 +308,6 @@ void loop() {
             if (status_reg & SYS_STATUS_LDEERR) Serial.print(" LDEERR");
             Serial.println();
         }
-        Serial.print("✓ KEK: ");
         dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
         
         /* Reset RX to properly reinitialise LDE operation. */
@@ -406,6 +391,9 @@ void loop() {
                 
                 /* Clear TXFRS event. */
                 dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_TXFRS);
+                
+                /* Force DW1000 back to IDLE after successful TX */
+                dwt_forcetrxoff();
                 
                 /* Increment frame sequence number after transmission of the response message (modulo 256). */
                 frame_seq_nb++;
