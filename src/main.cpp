@@ -99,6 +99,25 @@ static uint32 status_reg = 0;
 static double tof;
 static double distance;
 
+/* Kalman filter state for distance smoothing */
+static float kalman_distance = 0.0;
+static float kalman_uncertainty = 1.0;  // P - estimate uncertainty
+const float PROCESS_NOISE = 0.001;      // Q - very low, expect minimal distance change
+const float MEASUREMENT_NOISE = 0.15;   // R - higher to account for UWB ±10cm noise
+
+/* Simple 1D Kalman filter for distance */
+static float kalman_filter(float measurement) {
+    // Prediction step
+    kalman_uncertainty += PROCESS_NOISE;
+    
+    // Update step
+    float kalman_gain = kalman_uncertainty / (kalman_uncertainty + MEASUREMENT_NOISE);
+    kalman_distance += kalman_gain * (measurement - kalman_distance);
+    kalman_uncertainty = (1.0 - kalman_gain) * kalman_uncertainty;
+    
+    return kalman_distance;
+}
+
 /* Timestamps of frames transmission/reception. */
 typedef unsigned long long uint64;
 static uint64 poll_rx_ts;
@@ -280,12 +299,15 @@ void loop() {
             tof = ((rtd_init - rtd_resp * (1 - clockOffsetRatio)) / 2.0) * DWT_TIME_UNITS;
             distance = tof * SPEED_OF_LIGHT;
             
+            /* Apply Kalman filter for smooth distance */
+            float filtered_distance = kalman_filter(distance);
+            
             /* Display computed distance in Teleplot format with timestamp and unit. */
             success_count++;
             Serial.print(">distance:");
             Serial.print(millis());
             Serial.print(":");
-            Serial.print(distance, 2);
+            Serial.print(filtered_distance, 2);
             Serial.println("§m");
         }
         
@@ -399,12 +421,20 @@ void loop() {
                 frame_seq_nb++;
                 success_count++;
             } else {
+                /* Force IDLE if delayed TX failed */
+                dwt_forcetrxoff();
                 error_count++;
             }
+        } else {
+            /* Received frame but not a valid POLL - force IDLE */
+            dwt_forcetrxoff();
         }
     } else {
         /* Clear RX error events in the DW1000 status register. */
         dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_ERR);
+        
+        /* Force IDLE before reset */
+        dwt_forcetrxoff();
         
         /* Reset RX to properly reinitialise LDE operation. */
         dwt_rxreset();
