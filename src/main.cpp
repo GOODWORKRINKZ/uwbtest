@@ -54,14 +54,9 @@ static dwt_config_t config = {
 };
 
 /* Default antenna delay values for 64 MHz PRF. */
-/* TAG uses calibrated value, ANCHOR uses default */
-#if DEVICE_MODE == MODE_TAG
-#define TX_ANT_DLY 16586  // Calibrated for TAG
-#define RX_ANT_DLY 16586
-#else
-#define TX_ANT_DLY 16436  // Default for ANCHOR  
-#define RX_ANT_DLY 16436
-#endif
+/* Using average of calibrated values for symmetric system */
+#define TX_ANT_DLY 16511
+#define RX_ANT_DLY 16511
 
 #if CALIBRATION_MODE && DEVICE_MODE == MODE_TAG
 /* Calibration parameters */
