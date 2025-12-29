@@ -122,6 +122,12 @@ const float PROCESS_NOISE = 0.001;      // Q - very low, expect minimal distance
 const float MEASUREMENT_NOISE = 0.20;   // R - increased for multipath/NLOS rejection
 const float OUTLIER_THRESHOLD = 0.30;   // Reject measurements >30cm from estimate
 
+/* Moving average filter state */
+#define MOVING_AVG_SIZE 100  // ~2 seconds at 10Hz
+static float moving_avg_buffer[MOVING_AVG_SIZE];
+static uint8 moving_avg_index = 0;
+static uint8 moving_avg_count = 0;
+
 /* Simple 1D Kalman filter with outlier rejection */
 static float kalman_filter(float measurement) {
     // Initialize on first measurement
@@ -147,6 +153,25 @@ static float kalman_filter(float measurement) {
     kalman_uncertainty = (1.0 - kalman_gain) * kalman_uncertainty;
     
     return kalman_distance;
+}
+
+/* Moving average filter for additional smoothing */
+static float moving_average(float value) {
+    // Add new value to buffer
+    moving_avg_buffer[moving_avg_index] = value;
+    moving_avg_index = (moving_avg_index + 1) % MOVING_AVG_SIZE;
+    
+    if (moving_avg_count < MOVING_AVG_SIZE) {
+        moving_avg_count++;
+    }
+    
+    // Calculate average
+    float sum = 0.0;
+    for (uint8 i = 0; i < moving_avg_count; i++) {
+        sum += moving_avg_buffer[i];
+    }
+    
+    return sum / moving_avg_count;
 }
 
 /* Timestamps of frames transmission/reception. */
@@ -411,15 +436,33 @@ void loop() {
                 distance_sum = 0.0;
             }
 #else
-            /* Apply Kalman filter for smooth distance */
-            float filtered_distance = kalman_filter(distance);
+            /* Apply filters for smooth distance */
+            float kalman_filtered = kalman_filter(distance);
+            float smoothed_distance = moving_average(kalman_filtered);
             
-            /* Display computed distance in Teleplot format with timestamp and unit. */
+            /* Display all three distances in Teleplot format */
             success_count++;
-            Serial.print(">distance:");
-            Serial.print(millis());
+            uint32_t timestamp = millis();
+            
+            // Raw distance
+            Serial.print(">raw:");
+            Serial.print(timestamp);
             Serial.print(":");
-            Serial.print(filtered_distance, 2);
+            Serial.print(distance, 2);
+            Serial.println("§m");
+            
+            // Kalman filtered
+            Serial.print(">kalman:");
+            Serial.print(timestamp);
+            Serial.print(":");
+            Serial.print(kalman_filtered, 2);
+            Serial.println("§m");
+            
+            // Kalman + Moving Average
+            Serial.print(">smoothed:");
+            Serial.print(timestamp);
+            Serial.print(":");
+            Serial.print(smoothed_distance, 2);
             Serial.println("§m");
 #endif
         }
